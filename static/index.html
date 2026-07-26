@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Hermes Sentinel</title>
+<style>
+  :root {
+    --bg: #212121;
+    --surface: #2f2f2f;
+    --surface-hover: #3a3a3a;
+    --text: #ececec;
+    --text-secondary: #b4b4b4;
+    --text-muted: #8e8e8e;
+    --border: #444;
+    --accent: #10a37f;
+    --accent-hover: #0d8c6d;
+    --user-bg: #3a3a3a;
+    --error: #ef4444;
+    --code-bg: #1e1e1e;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ===== 顶部栏 ===== */
+  .header {
+    background: var(--surface);
+    padding: 8px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .header h1 {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+  }
+  .header-btns { display: flex; gap: 8px; }
+  .header-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 5px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .header-btn:hover { background: var(--surface-hover); color: var(--text); }
+
+  /* ===== 方向选择器 ===== */
+  .direction-select {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 5px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    outline: none;
+  }
+  .direction-select:focus { border-color: var(--accent); color: var(--text); }
+
+  /* ===== HTML 精排版日报/报告气泡（覆盖滚动+内联样式兼容） ===== */
+  .message-bubble.report-html {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    max-width: 100% !important;
+    overflow: visible !important;
+  }
+  .message-bubble.report-html table { width: 100% !important; }
+
+  /* ===== 聊天区域（内容驱动高度，输入框紧跟） ===== */
+  .chat-area {
+    flex: 1;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+    display: flex;
+    flex-direction: column;
+  }
+  .chat-area::-webkit-scrollbar { width: 6px; }
+  .chat-area::-webkit-scrollbar-track { background: transparent; }
+  .chat-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .chat-container {
+    max-width: 768px;
+    margin: 0 auto;
+    padding: 16px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    width: 100%;
+  }
+
+  /* ===== 欢迎消息 ===== */
+  .welcome {
+    text-align: center;
+    padding: 32px 16px 8px;
+  }
+  .welcome-title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .welcome-sub {
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+
+  /* ===== 消息行 ===== */
+  .message-row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .message-row.user {
+    flex-direction: row-reverse;
+  }
+
+  /* ===== 头像 ===== */
+  .avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .avatar.ai {
+    background: var(--accent);
+    color: white;
+  }
+  .avatar.user {
+    background: #5436da;
+    color: white;
+  }
+
+  /* ===== 消息内容 ===== */
+  .message-content {
+    flex: 1;
+    min-width: 0;
+  }
+  .message-row.user .message-content {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+  }
+
+  .message-bubble {
+    font-size: 14px;
+    line-height: 1.65;
+    word-wrap: break-word;
+    animation: fadeIn 0.2s ease;
+  }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+  /* 用户消息 */
+  .message-row.user .message-bubble {
+    background: var(--user-bg);
+    padding: 8px 14px;
+    border-radius: 16px;
+    max-width: 80%;
+    display: inline-block;
+  }
+
+  /* AI 消息 */
+  .message-row.ai .message-bubble {
+    color: var(--text);
+  }
+
+  /* ===== Markdown 渲染（AI 消息） ===== */
+  .md h2, .md h3, .md h4 {
+    font-weight: 600;
+    margin: 20px 0 12px;
+    line-height: 1.3;
+  }
+  .md h2 { font-size: 18px; }
+  .md h3 { font-size: 16px; }
+  .md h4 { font-size: 15px; }
+  .md h2:first-child, .md h3:first-child, .md h4:first-child { margin-top: 0; }
+
+  .md p { margin: 10px 0; }
+  .md p:first-child { margin-top: 0; }
+  .md p:last-child { margin-bottom: 0; }
+
+  .md strong { font-weight: 600; color: #fff; }
+  .md em { font-style: italic; color: var(--text-secondary); }
+  .md a { color: var(--accent); text-decoration: underline; }
+
+  /* 行内代码 */
+  .md code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 14px;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+  }
+
+  /* 代码块 */
+  .md pre {
+    background: var(--code-bg);
+    padding: 14px 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+    margin: 14px 0;
+  }
+  .md pre code {
+    background: none;
+    padding: 0;
+    font-size: 13.5px;
+    line-height: 1.5;
+  }
+
+  /* 列表 */
+  .md ul, .md ol { padding-left: 24px; margin: 10px 0; }
+  .md li { margin: 4px 0; line-height: 1.6; }
+
+  /* 引用 */
+  .md blockquote {
+    border-left: 3px solid var(--accent);
+    margin: 14px 0;
+    padding: 10px 16px;
+    background: rgba(16,163,127,0.08);
+    border-radius: 0 6px 6px 0;
+    color: var(--text-secondary);
+  }
+
+  /* 分割线 */
+  .md hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 20px 0;
+  }
+
+  /* 表格 */
+  .md table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 14px;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .md th, .md td {
+    border: 1px solid var(--border);
+    padding: 10px 14px;
+    text-align: left;
+  }
+  .md th {
+    background: var(--surface);
+    font-weight: 600;
+  }
+  .md tr:nth-child(even) { background: rgba(255,255,255,0.02); }
+
+  /* ===== 卡片式区块（日报等长内容） ===== */
+  .md-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin: 14px 0;
+  }
+  .md-card > :first-child { margin-top: 0; }
+  .md-card > :last-child { margin-bottom: 0; }
+
+  /* ===== 流式状态 ===== */
+  .stream-status {
+    font-size: 13px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .stream-dot {
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* ===== 输入区域 ===== */
+  .input-area {
+    background: var(--bg);
+    padding: 10px 0;
+    flex-shrink: 0;
+    border-top: 1px solid var(--border);
+  }
+  .input-container {
+    max-width: 768px;
+    margin: 0 auto;
+    padding: 0 24px;
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+  }
+  .input-wrapper {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 8px 16px;
+    transition: border-color 0.15s;
+  }
+  .input-wrapper:focus-within {
+    border-color: var(--accent);
+  }
+  .input-wrapper textarea {
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-size: 14px;
+    resize: none;
+    outline: none;
+    font-family: inherit;
+    max-height: 120px;
+    line-height: 1.5;
+  }
+  .input-wrapper textarea::placeholder { color: var(--text-muted); }
+
+  .send-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: none;
+    background: var(--accent);
+    color: white;
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: all 0.15s;
+  }
+  .send-btn:hover { background: var(--accent-hover); transform: scale(1.05); }
+  .send-btn:active { transform: scale(0.95); }
+  .send-btn.disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+
+  /* ===== 加载动画 ===== */
+  .typing {
+    display: flex;
+    gap: 4px;
+    padding: 8px 0;
+  }
+  .typing span {
+    width: 8px;
+    height: 8px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    animation: bounce 1.3s infinite;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.15s; }
+  .typing span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes bounce {
+    0%, 60%, 100% { transform: translateY(0); }
+    30% { transform: translateY(-8px); }
+  }
+
+  /* ===== 错误消息 ===== */
+  .error-bubble {
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.3);
+    color: var(--error);
+    padding: 12px 16px;
+    border-radius: 10px;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .retry-btn {
+    background: var(--error);
+    color: white;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .retry-btn:hover { opacity: 0.9; }
+
+  /* ===== 响应式 ===== */
+  @media (max-width: 600px) {
+    .chat-container, .input-container { padding: 0 16px; }
+    .avatar { width: 26px; height: 26px; font-size: 11px; }
+    .message-bubble { font-size: 13.5px; }
+    .md table { font-size: 13px; }
+    .md th, .md td { padding: 8px 10px; }
+    .header { padding: 8px 12px; }
+    .header h1 { font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Hermes Sentinel</h1>
+  <div class="header-btns">
+    <select id="directionSelect" class="direction-select" onchange="onDirectionChange(this.value)" title="选择你的方向，日报将基于此定制">
+      <option value="数据科学">📊 数据科学</option>
+      <option value="前端开发">🎨 前端开发</option>
+      <option value="后端开发">🖥️ 后端开发</option>
+      <option value="AI/LLM">🤖 AI/LLM</option>
+      <option value="全栈开发">🔧 全栈开发</option>
+      <option value="算法工程师">🧮 算法工程师</option>
+      <option value="数据分析">📈 数据分析</option>
+      <option value="产品经理">📋 产品经理</option>
+      <option value="测试开发">🧪 测试开发</option>
+      <option value="运维/DevOps">⚙️ 运维/DevOps</option>
+      <option value="移动开发">📱 移动开发</option>
+      <option value="安全工程师">🔒 安全工程师</option>
+    </select>
+    <button class="header-btn" onclick="quickReport()">📊 日报</button>
+    <button class="header-btn" onclick="location.href='/dashboard'">📈 后台</button>
+    <button class="header-btn" onclick="resetChat()">清除</button>
+  </div>
+</div>
+
+<div class="chat-area" id="chatArea">
+  <div class="chat-container" id="chatContainer">
+    <div class="welcome">
+      <div class="welcome-title">Hermes Sentinel</div>
+      <div class="welcome-sub">多渠道 AI 助手 · Email / Web · RAG 长期记忆<br>💬 对话 · 📊 日报 · 🔍 搜索 · 💻 控制电脑</div>
+    </div>
+  </div>
+</div>
+
+<div class="input-area">
+  <div class="input-container">
+    <div class="input-wrapper">
+      <textarea id="input" rows="1" placeholder="发送消息..." enterkeyhint="send"></textarea>
+    </div>
+    <button class="send-btn" id="sendBtn" onclick="sendMessage()">➤</button>
+  </div>
+</div>
+
+<script>
+const chatArea = document.getElementById('chatArea');
+const chatContainer = document.getElementById('chatContainer');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('sendBtn');
+
+let isProcessing = false;
+let autoScroll = true;
+const SESSION_ID = 'default';
+let DIRECTION = localStorage.getItem('hermes_direction') || '数据科学';
+
+// 初始化方向选择器
+function initDirection() {
+  const sel = document.getElementById('directionSelect');
+  if (sel) sel.value = DIRECTION;
+}
+function onDirectionChange(val) {
+  DIRECTION = val;
+  localStorage.setItem('hermes_direction', val);
+}
+
+// 页面加载时初始化
+document.addEventListener('DOMContentLoaded', initDirection);
+
+// 自动滚动检测
+chatArea.addEventListener('scroll', () => {
+  const diff = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight;
+  autoScroll = diff < 80;
+});
+
+// 输入框自动增高
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 150) + 'px';
+});
+
+// 回车发送
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+function scrollToBottom(smooth = true) {
+  chatArea.scrollTo({ top: chatArea.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
+}
+
+// ===== 添加消息 =====
+function addMessage(content, role) {
+  // 移除欢迎消息
+  const welcome = chatContainer.querySelector('.welcome');
+  if (welcome) welcome.remove();
+
+  const row = document.createElement('div');
+  row.className = `message-row ${role}`;
+
+  const avatar = document.createElement('div');
+  avatar.className = `avatar ${role}`;
+  avatar.textContent = role === 'ai' ? 'H' : 'U';
+
+  const contentDiv = document.createElement('div');
+  contentDiv.className = 'message-content';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'message-bubble';
+
+  if (role === 'ai') {
+    bubble.classList.add('md');
+    bubble.innerHTML = renderMarkdown(content);
+  } else {
+    bubble.textContent = content;
+  }
+
+  contentDiv.appendChild(bubble);
+  row.appendChild(avatar);
+  row.appendChild(contentDiv);
+  chatContainer.appendChild(row);
+
+  if (autoScroll) scrollToBottom();
+  return bubble;
+}
+
+// ===== 添加错误消息 =====
+function addError(message, originalText) {
+  const welcome = chatContainer.querySelector('.welcome');
+  if (welcome) welcome.remove();
+
+  const row = document.createElement('div');
+  row.className = 'message-row ai';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar ai';
+  avatar.textContent = 'H';
+
+  const contentDiv = document.createElement('div');
+  contentDiv.className = 'message-content';
+
+  const errorBubble = document.createElement('div');
+  errorBubble.className = 'error-bubble';
+  errorBubble.innerHTML = `<span>⚠️ ${message}</span>`;
+
+  if (originalText) {
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'retry-btn';
+    retryBtn.textContent = '重试';
+    retryBtn.onclick = () => {
+      row.remove();
+      input.value = originalText;
+      sendMessage();
+    };
+    errorBubble.appendChild(retryBtn);
+  }
+
+  contentDiv.appendChild(errorBubble);
+  row.appendChild(avatar);
+  row.appendChild(contentDiv);
+  chatContainer.appendChild(row);
+
+  if (autoScroll) scrollToBottom();
+}
+
+// ===== Markdown 渲染器 =====
+function renderMarkdown(text) {
+  if (!text) return '';
+
+  let html = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  // 代码块
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    return '<pre><code>' + code.trimEnd() + '</code></pre>';
+  });
+
+  // 行内代码
+  html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+  // 图片
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:8px;margin:10px 0;">');
+
+  // 链接
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+  // 标题
+  html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+
+  // 加粗/斜体/删除线
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+  html = html.replace(/~~(.+?)~~/g, '<del>$1</del>');
+
+  // 分割线
+  html = html.replace(/^(?:---|\*\*\*|___)\s*$/gm, '<hr>');
+
+  // 引用
+  html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+
+  // 逐行处理
+  const lines = html.split('\n');
+  let result = '';
+  let inList = false, listType = '';
+  let inTable = false, tableRows = [];
+  let inCard = false, cardContent = '';
+
+  function flushList() { if (inList) { result += '</' + listType + '>'; inList = false; } }
+  function flushTable() {
+    if (inTable && tableRows.length > 0) {
+      result += renderTable(tableRows);
+      tableRows = []; inTable = false;
+    }
+  }
+  function flushCard() {
+    if (inCard && cardContent.trim()) {
+      result += '<div class="md-card">' + cardContent + '</div>';
+      cardContent = ''; inCard = false;
+    }
+  }
+  function renderTable(rows) {
+    if (!rows || !rows.length) return '';
+    let t = '<table>';
+    const headers = rows[0].split('|').map(c => c.trim()).filter(Boolean);
+    t += '<thead><tr>' + headers.map(h => '<th>' + h + '</th>').join('') + '</tr></thead>';
+    let dataStart = 1;
+    if (rows.length > 1 && /^[\s|:-]+$/.test(rows[1])) dataStart = 2;
+    t += '<tbody>';
+    for (let i = dataStart; i < rows.length; i++) {
+      const cells = rows[i].split('|').map(c => c.trim()).filter(Boolean);
+      t += '<tr>' + cells.map(c => '<td>' + c + '</td>').join('') + '</tr>';
+    }
+    t += '</tbody></table>';
+    return t;
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line === '') { flushList(); flushTable(); if (inCard) cardContent += '<br>'; continue; }
+
+    if (/^<(h[234]|pre|hr|blockquote)/.test(line)) {
+      flushList(); flushTable();
+      if (/^<h[34]>/.test(line)) { flushCard(); inCard = true; cardContent = line + '\n'; }
+      else if (inCard) cardContent += line + '\n';
+      else result += line + '\n';
+      continue;
+    }
+
+    if (line.includes('|') && !/^<a\s/.test(line)) {
+      if (!inTable) { flushList(); if (!inCard) inCard = true; }
+      if (inCard) { if (!inTable) { flushList(); inTable = true; } tableRows.push(line); }
+      else { if (!inTable) { flushList(); inTable = true; } tableRows.push(line); }
+      continue;
+    }
+
+    flushTable();
+
+    if (/^[-*]\s/.test(line)) {
+      if (!inList || listType !== 'ul') { flushList(); if (!inCard) { inCard = true; cardContent = ''; } result += '<ul>'; inList = true; listType = 'ul'; }
+      const liContent = line.replace(/^[-*]\s+/, '');
+      if (inCard) cardContent += '<li>' + liContent + '</li>\n';
+      else result += '<li>' + liContent + '</li>\n';
+      continue;
+    }
+
+    if (/^\d+\.\s/.test(line)) {
+      if (!inList || listType !== 'ol') { flushList(); if (!inCard) { inCard = true; cardContent = ''; } result += '<ol>'; inList = true; listType = 'ol'; }
+      const liContent = line.replace(/^\d+\.\s+/, '');
+      if (inCard) cardContent += '<li>' + liContent + '</li>\n';
+      else result += '<li>' + liContent + '</li>\n';
+      continue;
+    }
+
+    flushList();
+    if (inCard) cardContent += '<p>' + line + '</p>\n';
+    else result += '<p>' + line + '</p>\n';
+  }
+
+  flushList(); flushTable(); flushCard();
+  return result.trim();
+}
+
+// ===== 加载动画 =====
+function showTyping() {
+  const welcome = chatContainer.querySelector('.welcome');
+  if (welcome) welcome.remove();
+
+  const row = document.createElement('div');
+  row.className = 'message-row ai';
+  row.id = 'typingRow';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar ai';
+  avatar.textContent = 'H';
+
+  const contentDiv = document.createElement('div');
+  contentDiv.className = 'message-content';
+  contentDiv.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+
+  row.appendChild(avatar);
+  row.appendChild(contentDiv);
+  chatContainer.appendChild(row);
+
+  if (autoScroll) scrollToBottom();
+}
+
+function hideTyping() {
+  const el = document.getElementById('typingRow');
+  if (el) el.remove();
+}
+
+// ===== 发送消息 =====
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text || isProcessing) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+  addMessage(text, 'user');
+
+  isProcessing = true;
+  sendBtn.disabled = true;
+  sendBtn.classList.add('disabled');
+  showTyping();
+
+  try {
+    const resp = await fetch('/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text, session_id: SESSION_ID, direction: DIRECTION })
+    });
+
+    hideTyping();
+
+    if (!resp.ok) {
+      addError(`请求失败 (HTTP ${resp.status})`, text);
+      return;
+    }
+
+    // 创建流式 AI 气泡
+    const welcome = chatContainer.querySelector('.welcome');
+    if (welcome) welcome.remove();
+
+    const row = document.createElement('div');
+    row.className = 'message-row ai';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar ai';
+    avatar.textContent = 'H';
+
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'message-bubble md';
+
+    const statusEl = document.createElement('div');
+    statusEl.className = 'stream-status';
+    statusEl.innerHTML = '<span class="stream-dot"></span><span>正在思考…</span>';
+    bubble.appendChild(statusEl);
+
+    contentDiv.appendChild(bubble);
+    row.appendChild(avatar);
+    row.appendChild(contentDiv);
+    chatContainer.appendChild(row);
+
+    if (autoScroll) scrollToBottom();
+
+    // ===== 流式读取（带 fallback） =====
+    let useStream = true;
+    if (!resp.body) {
+      useStream = false;
+    } else {
+      try {
+        // 某些浏览器/环境下 resp.body 存在但不是真正的 ReadableStream
+        if (typeof resp.body.getReader !== 'function') {
+          useStream = false;
+        }
+      } catch (e) {
+        useStream = false;
+      }
+    }
+
+    if (useStream) {
+      // === ReadableStream 流式模式 ===
+      try {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let fullText = '';
+        let firstToken = true;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) >= 0) {
+            const chunk = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const dataLine = chunk.split('\n').find(l => l.startsWith('data:'));
+            if (!dataLine) continue;
+
+            let ev;
+            try { ev = JSON.parse(dataLine.slice(5).trim()); }
+            catch { continue; }
+
+            if (ev.type === 'status') {
+              statusEl.querySelector('span:last-child').textContent = ev.text;
+            } else if (ev.type === 'token') {
+              if (firstToken) {
+                firstToken = false;
+                statusEl.remove();
+              }
+              fullText += ev.content;
+              bubble.innerHTML = renderMarkdown(fullText);
+              if (autoScroll) scrollToBottom();
+            } else if (ev.type === 'done') {
+              // 关键：重置 firstToken 并移除 statusEl，避免流结束兜底把已渲染的 HTML 覆盖成"响应为空"
+              firstToken = false;
+              if (statusEl.parentNode) statusEl.remove();
+              if (ev.html) {
+                // HTML 精排版（日报/求职报告邮件模板）
+                bubble.classList.add('report-html');
+                bubble.innerHTML = ev.html;
+              } else {
+                const finalText = ev.text || fullText;
+                bubble.innerHTML = renderMarkdown(finalText);
+              }
+            } else if (ev.type === 'error') {
+              firstToken = false;
+              if (statusEl.parentNode) statusEl.remove();
+              bubble.innerHTML = `<div class="error-bubble">⚠️ ${ev.text}</div>`;
+            }
+          }
+        }
+
+        if (firstToken && statusEl.parentNode) {
+          bubble.innerHTML = '<div class="error-bubble">⚠️ 响应为空</div>';
+        }
+      } catch (streamErr) {
+        // 流式读取失败，显示错误并提示重试
+        bubble.innerHTML = `<div class="error-bubble">⚠️ 流式读取失败: ${streamErr.message}</div>`;
+      }
+    } else {
+      // === 降级：整体读取模式 ===
+      try {
+        const respText = await resp.text();
+        const lines = respText.split('\n').filter(l => l.startsWith('data:'));
+        let fullText = '';
+        let finalText = '';
+
+        let finalHtml = '';
+        for (const line of lines) {
+          try {
+            const ev = JSON.parse(line.slice(5).trim());
+            if (ev.type === 'status') {
+              statusEl.querySelector('span:last-child').textContent = ev.text;
+            } else if (ev.type === 'token') {
+              fullText += ev.content;
+            } else if (ev.type === 'done') {
+              finalText = ev.text || fullText;
+              if (ev.html) finalHtml = ev.html;
+            } else if (ev.type === 'error') {
+              finalText = `⚠️ ${ev.text}`;
+            }
+          } catch (_) {}
+        }
+
+        statusEl.remove();
+        if (finalHtml) {
+          bubble.innerHTML = `<div class="report-html">${finalHtml}</div>`;
+        } else {
+          bubble.innerHTML = renderMarkdown(finalText || fullText || '(无回复)');
+        }
+      } catch (textErr) {
+        bubble.innerHTML = `<div class="error-bubble">⚠️ 解析响应失败: ${textErr.message}</div>`;
+      }
+    }
+
+  } catch (err) {
+    hideTyping();
+    addError(`网络错误: ${err.message}`, text);
+  } finally {
+    isProcessing = false;
+    sendBtn.disabled = false;
+    sendBtn.classList.remove('disabled');
+    input.focus();
+  }
+}
+
+// ===== 重置对话 =====
+async function resetChat() {
+  if (!confirm('确定清除对话历史吗？')) return;
+  try {
+    await fetch('/reset?session_id=' + SESSION_ID, { method: 'POST' });
+    chatContainer.innerHTML = `
+      <div class="welcome">
+        <div class="welcome-title">Hermes Sentinel</div>
+        <div class="welcome-sub">对话已重置 · 发送消息开始新对话</div>
+      </div>`;
+  } catch (err) {
+    addError('重置失败: ' + err.message);
+  }
+}
+
+function quickReport() {
+  input.value = '发日报';
+  sendMessage();
+}
+
+input.focus();
+</script>
+</body>
+</html>

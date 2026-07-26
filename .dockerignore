@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.env
+hermes.db
+hermes.db-journal
+kb/
+.git/
+.gitignore
+*.log
+.DS_Store
