@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body{font-family:-apple-system,"PingFang SC",sans-serif;width:300px;padding:12px;margin:0;color:#0f172a}
+  .hd{font-weight:700;font-size:15px;margin-bottom:6px}
+  .src{font-size:11px;color:#64748b;word-break:break-all;margin-bottom:10px;max-height:32px;overflow:hidden}
+  label{display:block;font-size:12px;color:#334155;margin:8px 0 2px}
+  input{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px}
+  button{margin-top:12px;width:100%;padding:9px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}
+  button:active{background:#1d4ed8}
+  details{margin-top:10px;font-size:12px;color:#475569}
+  summary{cursor:pointer}
+  .status{margin-top:10px;font-size:12px;min-height:16px}
+  .status.ok{color:#16a34a}
+  .status.err{color:#dc2626}
+</style>
+</head>
+<body>
+  <div class="hd">Hermes 网申捕获</div>
+  <div id="src" class="src"></div>
+  <label>公司</label><input id="company" placeholder="自动提取，可改">
+  <label>岗位</label><input id="title" placeholder="自动提取，可改（可空）">
+  <button id="record">记录本次投递</button>
+  <button id="readList" style="background:#16a34a">读取「我的投递」列表</button>
+  <details>
+    <summary>连接设置</summary>
+    <label>服务地址</label><input id="server" placeholder="http://127.0.0.1:9866">
+    <label>Token</label><input id="token" placeholder="hermes-ext-2026">
+  </details>
+  <div id="status" class="status"></div>
+  <script src="shared.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

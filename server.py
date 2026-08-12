@@ -13,12 +13,16 @@ Hermes Sentinel — 多渠道 AI 助手 + 电脑控制 + AI 情报收集
 """
 
 import os
-import json
+import re
 import ssl
+import json
+import time
 import asyncio
 import logging
 import sqlite3
+import contextlib
 import subprocess
+import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -27,9 +31,15 @@ from typing import Optional
 from hermes_rag import retrieve_context, get_store
 
 import httpx
+import certifi
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, StreamingResponse
+
+
+# 注：对外抓取已统一使用 verify=certifi.where()（系统 CA 校验，最安全默认）；
+# 原 _areq 回退封装因回退实现有误且未被调用，已移除以避免死代码/假绿。
+from fastapi import FastAPI, Request, Depends, Header, HTTPException
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -38,8 +48,8 @@ logger = logging.getLogger("hermes")
 # 加载 .env（Caspian 密钥等）
 load_dotenv(Path(__file__).parent / ".env")
 
-# 修复 Windows SSL
-ssl._create_default_https_context = ssl._create_unverified_context
+# 注意：不再全局禁用 SSL 证书校验（原 ssl._create_default_https_context=unverified 会让所有出站 HTTPS 不验证，属高危）。
+# 仅 httpx 工具调用按需局部使用 verify=certifi.where()；其余恢复系统证书校验。
 
 # ============================================================
 # 配置
@@ -48,14 +58,22 @@ API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 BASE_URL = "https://api.deepseek.com/v1"
 MODEL = "deepseek-v4-flash"
 AUTH_HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-# HOST="0.0.0.0" 纯 IPv4 监听：本机 127.0.0.1 / localhost(需代理例外) 均可访问。
-# 注：本机 "::" 为纯 IPv6 绑定（未开双栈），会导致 127.0.0.1 连不上，故用 IPv4。
-HOST = "0.0.0.0"
+# 仅监听本机回环地址：避免同网段任意设备访问本服务。
+# 关键点：execute_command 工具可触发本机命令执行，0.0.0.0 暴露等同于把受限 RCE 暴露给局域网。
+HOST = "127.0.0.1"
 # 端口优先读环境变量 PORT（云端平台动态分配端口），本地默认 9865
 PORT = int(os.getenv("PORT", 9866))
 
 CASPIAN_API_KEY = os.getenv("CASPIAN_API_KEY", "")
 DB_PATH = Path(__file__).parent / "hermes.db"
+# 浏览器扩展上报鉴权 token（可在 .env 覆盖；默认仅供本机使用）
+EXT_TOKEN = os.getenv("EXT_TOKEN", secrets.token_hex(16))  # 默认随机，避免硬编码默认被猜解
+# Web UI 调用 /chat 的访问令牌。默认随机生成（启动即打印），避免硬编码默认值被猜解。
+# 由服务端在渲染 index.html/jobs.html 时注入（__WEB_TOKEN__ 占位），前端不再 fetch /api/token，
+# 本机任意进程无法再领到有效令牌；配合 127.0.0.1 绑定确保外部不可读。
+WEB_TOKEN = os.getenv("WEB_TOKEN", secrets.token_hex(16))
+# GitHub API 可选令牌：填入可把匿名 60 次/小时 提额到 5000 次/小时，缓解限流
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 KB_PATH = Path(__file__).parent / "kb"           # 长期知识库（RAG）持久化目录
 
 # ============================================================
@@ -64,7 +82,10 @@ KB_PATH = Path(__file__).parent / "kb"           # 长期知识库（RAG）持�
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # 注意：库文件使用 DELETE 日志模式（非 WAL）。WAL 在多连接/多进程
+    # 场景下会因 -wal 文件锁竞争导致端点内同步写间歇性报 readonly。
+    # 统一 busy_timeout 让写锁竞争时等待而非立即失败。
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 def init_db():
@@ -98,7 +119,7 @@ def load_history(session_id: str, max_messages: int = 30) -> list[dict]:
         rows = db.execute(
             "SELECT role, content FROM conversations "
             "WHERE session_id = ? AND role != 'tool' "
-            "ORDER BY created_at DESC LIMIT ?",
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (session_id, max_messages)
         ).fetchall()
     messages = []
@@ -141,6 +162,18 @@ def _save_report(report_type: str, data: dict, html: str = None):
 # FastAPI
 # ============================================================
 app = FastAPI(title="Hermes Sentinel")
+# CORS 收敛：仅允许本机回环源（Web UI 同源访问），杜绝外部站点跨域读取本服务响应。
+_ALLOWED_ORIGINS = [
+    f"http://127.0.0.1:{PORT}",
+    f"http://localhost:{PORT}",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -160,7 +193,8 @@ SYSTEM_PROMPT = """你是 Hermes，用户的专属 AI 情报官。
 
 规则：中文回答，简洁务实。信息要筛选——只告诉用户对他求职和学习有用的东西，不用什么都报。提供可操作的建议。
 **不要预设固定的区块/表格结构。如果某个方面没有足够信息，直接不写，不要留空标题。**
-**必须使用 content 字段输出回答，不要只输出 reasoning_content。**"""
+**必须使用 content 字段输出回答，不要只输出 reasoning_content。**
+**绝对禁止在回复中输出任何内部分析语言或指令复述**——不得出现\"我们注意到\"\"需要根据用户画像\"\"需要注意的是\"\"只输出content\"\"回答要简洁\"之类的话，也不得复述系统指令。直接给出面向用户的最终回答正文，第一句就进入正题。**"""
 
 # 方向 → 用户画像映射
 DIRECTION_PROFILES = {
@@ -343,6 +377,28 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}}
         }
     },
+        {
+            "type": "function",
+            "function": {
+            "name": "job_sentinel_scan",
+            "description": "秋招哨兵：扫描多渠道校招岗位（含武汉/湖北央企国企），按用户画像(地区/方向/学历/院校/批次)硬过滤+规则匹配打分，存入岗位库供前端卡片流查看与投递追踪。用户说「扫岗位/查秋招/找岗位/岗位哨兵/查岗位」时触发。",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "job_sync_email",
+            "description": "解析投递确认/笔试/面试/offer/拒信邮件，自动回写「岗位哨兵」里对应公司的投递状态。用户把邮件正文粘贴过来并说「解析这封邮件」，或 QQ 邮箱自动转发到本地址时触发。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "邮件正文全文（含公司名与状态字样如 投递成功/笔试/面试/录用/未通过）"}
+                },
+                "required": ["text"]
+            }
+        }
+    }
 ]
 
 
@@ -364,10 +420,13 @@ COMMAND_DENYLIST = {  # 独立危险命令（单词边界匹配，防误伤 git/
     "taskkill", "powershell", "pwsh", "cmd", "certutil", "curl", "wget",
     "bitsadmin", "schtasks", "at", "sc", "net",
 }
-COMMAND_DENY_SUBSTR = {  # 特殊符号串（子串匹配，防 shell 绕过）
-    "></dev/sd", ":|:", "|sh", "&&sh",
-}
+# 解释器类：禁止直接执行代码字符串 / 重定向，只允许运行脚本文件(.py/.js)
+_INTERPRETERS = {"python", "python3", "node"}
+_INTERPRETER_CODE_FLAGS = {"-c", "-m", "-e", "-x", "-i", "-r",
+                           "--command", "--code", "--eval"}
 import re as _re
+# shell 元字符：出现任意一种即拒绝（Windows 与 POSIX 通用高危，防链式注入）
+_SHELL_META = set("&|;><^`%()") | {"\n", "\r"}
 
 
 def _command_allowed(command: str):
@@ -376,20 +435,34 @@ def _command_allowed(command: str):
     low = c.lower()
     if not low:
         return False, "命令为空"
-    # 1) 特殊符号串子串匹配（防 shell 绕过，如 fork bomb、写设备）
-    for d in COMMAND_DENY_SUBSTR:
-        if d in low:
-            return False, f"命中危险指令拦截: '{d}'"
-    # 2) 危险命令词边界匹配（避免误伤 git status 中的 'at'、format 中的 'rm'）
+    # 0) shell 元字符拦截（防 `dir & whoami`、`a | b` 等链式注入，最高优先级）
+    if any(ch in c for ch in _SHELL_META):
+        return False, "含禁止的 shell 元字符（& | ; > < ^ `）"
+    # 1) 危险命令词边界匹配（避免误伤 git status 中的 'at'、format 中的 'rm'）
     for d in COMMAND_DENYLIST:
         if _re.search(r"(?<![a-z0-9])" + _re.escape(d) + r"(?![a-z0-9])", low):
             return False, f"命中危险指令拦截: '{d}'"
-    # 3) 提取首个 token 的 basename（去路径、去引号、去扩展名）
+    # 2) 提取首个 token 的 basename（去路径、去引号、去扩展名）
     first = low.split()[0].replace('"', "").replace("'", "")
     base = first.split("\\")[-1].split("/")[-1]
     for ext in (".exe", ".bat", ".cmd", ".ps1"):
         if base.endswith(ext):
             base = base[: -len(ext)]
+    # 3) 解释器加固：禁止 -c/-m 等直接执行代码；必须运行脚本文件
+    if base in _INTERPRETERS:
+        toks = low.split()
+        bad = [t for t in toks if t in _INTERPRETER_CODE_FLAGS]
+        if bad:
+            return False, f"解释器禁止 {bad} 直接执行代码"
+        script_toks = [t for t in toks if t.endswith((".py", ".js", ".ipynb"))]
+        if not script_toks:
+            return False, "解释器须运行脚本文件（.py/.js/.ipynb），不允许裸执行"
+        # 读写分区：脚本必须位于项目 scripts/ 目录（write_file 写不进该区）
+        for t in script_toks:
+            t2 = t.replace('"', "").replace("'", "")
+            sp = (Path.cwd() / t2).resolve() if not os.path.isabs(t2) else Path(t2).resolve()
+            if not (str(sp) == str(_SCRIPT_DIR) or str(sp).startswith(str(_SCRIPT_DIR) + os.sep)):
+                return False, "脚本必须位于项目 scripts/ 目录（模型不可写，防提权）"
     if base in COMMAND_ALLOWLIST:
         return True, ""
     return False, f"'{base}' 不在执行白名单（允许: {', '.join(sorted(COMMAND_ALLOWLIST))}）"
@@ -418,9 +491,54 @@ async def execute_command(command: str) -> str:
         return f"错误: {e}"
 
 
+# 文件读写白名单：仅允许在项目根目录及用户常用目录内操作，
+# 并禁止访问敏感文件（.env / server.py / 数据库等），
+# 切断"任意读 .env + 写 evil.py 后 python 执行"的提权链。
+_FILE_DENY_NAMES = {".env", "server.py", "watchdog.py", "启动.bat", "停止.bat",
+                    "requirements.txt", "test_dashboard.py"}
+# ── 读写分区（封堵"写 evil.py + python 执行"提权链）──
+# 模型可写区：仅 data/ 与 outputs/（数据目录，不含可执行文件）；
+# 模型可执行区：仅项目 scripts/ 预置脚本（write_file 写不进去）。
+_WRITABLE_SUBDIRS = ("data", "outputs")
+_EXEC_EXTENSIONS = {".py", ".pyw", ".js", ".mjs", ".ipynb",
+                    ".bat", ".cmd", ".ps1", ".vbs", ".exe", ".sh", ".psm1"}
+_SCRIPT_DIR = (Path(__file__).parent / "scripts").resolve()
+
+
+def _write_allowed(p: Path) -> tuple[bool, str]:
+    """write_file 专用：仅允许写入 data/ 与 outputs/，且禁止可执行扩展名。"""
+    rp = p.resolve()
+    root = Path(__file__).parent.resolve()
+    if not any(str(rp).startswith(str((root / sub).resolve()) + os.sep)
+               for sub in _WRITABLE_SUBDIRS):
+        return False, "仅允许写入 data/ 与 outputs/ 数据目录（防提权）"
+    if p.suffix.lower() in _EXEC_EXTENSIONS:
+        return False, f"禁止写入可执行文件类型: {p.suffix}"
+    return True, ""
+
+
+def _file_allowed(p: Path) -> tuple[bool, str]:
+    name = (p.name or "").lower()
+    if name in _FILE_DENY_NAMES or name.endswith(".db") or name.startswith(".env"):
+        return False, f"禁止访问敏感文件: {p.name}"
+    roots = [(Path(__file__).parent).resolve()]
+    for sub in ("Documents", "Downloads", "Desktop"):
+        hp = Path.home() / sub
+        if hp.exists():
+            roots.append(hp.resolve())
+    rp = p.resolve()
+    for root in roots:
+        if rp == root or str(rp).startswith(str(root) + os.sep):
+            return True, ""
+    return False, "路径越界：仅允许项目目录及用户文档/下载/桌面"
+
+
 async def read_file(path: str) -> str:
     try:
         p = Path(path).expanduser().resolve()
+        ok, why = _file_allowed(p)
+        if not ok:
+            return f"拒绝访问: {why}"
         if not p.exists():
             return f"不存在: {path}"
         if p.is_dir():
@@ -439,6 +557,9 @@ async def read_file(path: str) -> str:
 async def write_file(path: str, content: str) -> str:
     try:
         p = Path(path).expanduser().resolve()
+        ok, why = _write_allowed(p)
+        if not ok:
+            return f"拒绝访问: {why}"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, "utf-8")
         return f"✅ 已写入: {p} ({len(content)} 字符)"
@@ -448,7 +569,7 @@ async def write_file(path: str, content: str) -> str:
 
 async def search_github(keyword: str, max_results: int = 5) -> str:
     try:
-        async with httpx.AsyncClient(timeout=15, verify=False) as cli:
+        async with httpx.AsyncClient(timeout=15, verify=certifi.where()) as cli:
             r = await cli.get("https://api.github.com/search/repositories", params={
                 "q": keyword, "sort": "stars", "order": "desc", "per_page": max_results
             })
@@ -471,7 +592,7 @@ async def search_github(keyword: str, max_results: int = 5) -> str:
 async def hackernews_top(count: int = 10) -> str:
     """获取 HackerNews 热门"""
     try:
-        async with httpx.AsyncClient(timeout=15, verify=False) as cli:
+        async with httpx.AsyncClient(timeout=15, verify=certifi.where()) as cli:
             # 获取 top story IDs
             r = await cli.get("https://hacker-news.firebaseio.com/v0/topstories.json")
             ids = r.json()[:count]
@@ -499,37 +620,46 @@ async def hackernews_top(count: int = 10) -> str:
 
 
 async def arxiv_latest(keyword: str = "AI agent", max_results: int = 5) -> str:
-    """搜索 arXiv 最新论文"""
-    try:
-        async with httpx.AsyncClient(timeout=20, verify=False) as cli:
-            r = await cli.get("https://export.arxiv.org/api/query", params={
-                "search_query": f"all:{keyword}",
-                "start": 0,
-                "max_results": max_results,
-                "sortBy": "submittedDate",
-                "sortOrder": "descending",
-            })
-            if r.status_code != 200:
-                return f"arXiv API {r.status_code}"
+    """搜索 arXiv 最新论文（带超时退避重试，缓解限流/偶发连接失败）"""
+    last_err = "arXiv 搜索失败"
+    r = None
+    for _attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=20, verify=certifi.where()) as cli:
+                r = await cli.get("https://export.arxiv.org/api/query", params={
+                    "search_query": f"all:{keyword}",
+                    "start": 0,
+                    "max_results": max_results,
+                    "sortBy": "submittedDate",
+                    "sortOrder": "descending",
+                })
+            if r.status_code == 200:
+                last_err = ""
+                break
+            last_err = f"arXiv API {r.status_code}"
+        except Exception as e:
+            last_err = f"arXiv 请求异常: {e}"
+        if _attempt < 2:
+            await asyncio.sleep(2 * (_attempt + 1))
+    if last_err:
+        return last_err
 
-            # 简单解析 XML
-            import xml.etree.ElementTree as ET
-            ns = {"a": "http://www.w3.org/2005/Atom"}
-            root = ET.fromstring(r.text)
-            entries = root.findall("a:entry", ns)
+    # 简单解析 XML
+    import xml.etree.ElementTree as ET
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    root = ET.fromstring(r.text)
+    entries = root.findall("a:entry", ns)
 
-            lines = [f"📚 **arXiv 最新: 「{keyword}」** ({len(entries)} 篇)\n"]
-            for i, e in enumerate(entries, 1):
-                title = (e.find("a:title", ns).text or "").strip().replace("\n", " ")
-                url = e.find("a:id", ns).text or ""
-                authors = [a.find("a:name", ns).text for a in e.findall("a:author", ns) if a.find("a:name", ns) is not None]
-                published = (e.find("a:published", ns).text or "")[:10]
-                lines.append(f"{i}. **{title}**")
-                lines.append(f"   👤 {', '.join(authors[:3])}{'...' if len(authors)>3 else ''} | 📅 {published}")
-                lines.append(f"   🔗 {url}\n")
-            return "\n".join(lines)
-    except Exception as e:
-        return f"arXiv 搜索失败: {e}"
+    lines = [f"📚 **arXiv 最新: 「{keyword}」** ({len(entries)} 篇)\n"]
+    for i, e in enumerate(entries, 1):
+        title = (e.find("a:title", ns).text or "").strip().replace("\n", " ")
+        url = e.find("a:id", ns).text or ""
+        authors = [a.find("a:name", ns).text for a in e.findall("a:author", ns) if a.find("a:name", ns) is not None]
+        published = (e.find("a:published", ns).text or "")[:10]
+        lines.append(f"{i}. **{title}**")
+        lines.append(f"   👤 {', '.join(authors[:3])}{'...' if len(authors)>3 else ''} | 📅 {published}")
+        lines.append(f"   🔗 {url}\n")
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -572,7 +702,7 @@ async def web_search(query: str, max_results: int = 5) -> str:
     bing_key = os.getenv("BING_SEARCH_KEY")
     if bing_key:
         try:
-            async with httpx.AsyncClient(timeout=15, verify=False) as cli:
+            async with httpx.AsyncClient(timeout=15, verify=certifi.where()) as cli:
                 r = await cli.get(
                     "https://api.bing.microsoft.com/v7.0/search",
                     headers={"Ocp-Apim-Subscription-Key": bing_key},
@@ -592,7 +722,7 @@ async def web_search(query: str, max_results: int = 5) -> str:
 
     # 数据源 2：DuckDuckGo HTML（免密钥）
     try:
-        async with httpx.AsyncClient(timeout=15, verify=False, headers={"User-Agent": "Mozilla/5.0"}) as cli:
+        async with httpx.AsyncClient(timeout=15, verify=certifi.where(), headers={"User-Agent": "Mozilla/5.0"}) as cli:
             r = await cli.post("https://html.duckduckgo.com/html/", data={"q": query})
             if r.status_code == 200:
                 parsed = _parse_ddg_html(r.text, max_results)
@@ -641,7 +771,7 @@ async def kb_add(action: str, value: str, source: str = "") -> str:
             md = p.suffix.lower() in (".md", ".markdown")
             res = store.add_text(txt, source or p.name, markdown=md)
         elif action == "url":
-            async with httpx.AsyncClient(timeout=20, verify=False, headers={"User-Agent": "Mozilla/5.0"}) as c:
+            async with httpx.AsyncClient(timeout=20, verify=certifi.where(), headers={"User-Agent": "Mozilla/5.0"}) as c:
                 r = await c.get(value)
                 r.raise_for_status()
             txt = _strip_html_simple(r.text)
@@ -672,18 +802,200 @@ async def kb_stats() -> str:
         return f"⚠️ 无法读取知识库: {e}"
 
 
-async def ai_daily_report(direction: str = "数据科学") -> str:
+# —— 简单 TTL 缓存：缓解 GitHub/arXiv/HN/新闻 外部 API 限流（日报频繁生成时不重复打）——
+_FETCH_CACHE: dict[str, tuple[float, object]] = {}
+
+async def _cached(key: str, ttl: int, coro_fn):
+    """带 TTL 的内存缓存：命中未过期直接返回，避免重复请求外部 API 触发限流。"""
+    now = time.time()
+    hit = _FETCH_CACHE.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    data = await coro_fn()
+    _FETCH_CACHE[key] = (now, data)
+    return data
+
+
+def _user_job_context() -> str:
+    """从 jobs 表读取用户真实投递统计，注入日报 prompt 做个性化建议。"""
+    try:
+        with contextlib.closing(sqlite3.connect(str(DB_PATH))) as c:
+            c.row_factory = sqlite3.Row
+            total = c.execute("SELECT count(*) FROM jobs").fetchone()[0]
+            status_rows = c.execute("SELECT status, count(*) as cnt FROM jobs GROUP BY status ORDER BY cnt DESC").fetchall()
+            status_dist = ", ".join(f"{r['status']} {r['cnt']}" for r in status_rows)
+            # 最近投递的公司（去重，最多 8 家）
+            companies = [r[0] for r in c.execute(
+                "SELECT DISTINCT company FROM jobs WHERE status IN ('已投','面试','OC') ORDER BY rowid DESC LIMIT 8"
+            ).fetchall()]
+            # 目标城市
+            cities = c.execute("SELECT DISTINCT city FROM jobs WHERE city != '' LIMIT 5").fetchall()
+            city_list = ", ".join(r[0] for r in cities if r[0]) or "武汉/孝感"
+        return f"""用户当前求职画像：
+- 岗位库共 {total} 条，状态分布：{status_dist}
+- 已投递/面试中的公司：{', '.join(companies) if companies else '暂无'}
+- 目标城市：{city_list}"""
+    except Exception:
+        return "（无法读取用户投递数据）"
+
+
+def _parse_report_json(content: str):
+    """鲁棒解析模型返回的 JSON：去 markdown、去尾逗号、转义字符串内裸换行、json5 兜底、截断自愈。"""
+    import re, json5
+    if not content or not content.strip():
+        return None
+    raw = re.sub(r"^\s*```json?\s*|\s*```\s*$", "", content, flags=re.MULTILINE)
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return None
+    blob = m.group()
+    blob = re.sub(r",(\s*[}\]])", r"\1", blob)  # 常见尾逗号
+    # 字符串值内的裸换行/回车会破坏 JSON 结构，转义成空格
+    blob = re.sub(r'("(?:\\.|[^"\\])*?")',
+                  lambda mm: mm.group(1).replace("\n", " ").replace("\r", " "), blob, flags=re.S)
+    for _parser in (json5.loads, lambda b: json.loads(b, strict=False)):
+        try:
+            _d = _parser(blob)
+            if isinstance(_d, dict):
+                return _d
+        except Exception:
+            continue
+    # 截断自愈：模型输出超出 max_tokens 被截断时，尝试闭合字符串与括号
+    return _repair_truncated_json(blob)
+
+
+def _repair_truncated_json(blob: str):
+    """修复被截断的 JSON：闭合未结束的字符串，再平衡括号。失败返回 None。"""
+    import re, json5
+    s = blob.rstrip()
+    if not s:
+        return None
+    # 1) 闭合未结束的字符串（未转义引号数为奇数）
+    in_str = False
+    escaped = False
+    for ch in s:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+    if in_str:
+        s += '"'
+    # 2) 平衡括号（忽略字符串内字符）
+    opens = {"{": "}", "[": "]"}
+    stack = []
+    in_str = False
+    escaped = False
+    for ch in s:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in opens:
+            stack.append(opens[ch])
+        elif ch in ("}", "]"):
+            if stack and stack[-1] == ch:
+                stack.pop()
+    s = re.sub(r",(\s*[}\]])", r"\1", s)  # 去掉可能因截断留下的尾逗号
+    s += "".join(reversed(stack))
+    try:
+        _d = json5.loads(s)
+        return _d if isinstance(_d, dict) else None
+    except Exception:
+        return None
+
+
+# 精选热门 AI/Agent 开源库：GitHub 限流(无 GITHUB_TOKEN 匿名 60次/小时)时的兜底候选，均为真实可查仓库
+_CURATED_OSS = [
+    {"name": "langchain-ai/langchain", "stars": "?", "lang": "Python", "desc": "LLM 应用开发事实标准框架"},
+    {"name": "microsoft/autogen", "stars": "?", "lang": "Python", "desc": "多智能体编排框架"},
+    {"name": "crewAIInc/crewAI", "stars": "?", "lang": "Python", "desc": "角色化多 Agent 协作框架"},
+    {"name": "vllm-project/vllm", "stars": "?", "lang": "Python", "desc": "高性能 LLM 推理与服务引擎"},
+    {"name": "huggingface/transformers", "stars": "?", "lang": "Python", "desc": "主流模型与微调生态"},
+    {"name": "run-llama/llama_index", "stars": "?", "lang": "Python", "desc": "RAG 数据框架"},
+    {"name": "mem0ai/mem0", "stars": "?", "lang": "Python", "desc": "AI 长期记忆层"},
+    {"name": "n8n-io/n8n", "stars": "?", "lang": "TypeScript", "desc": "工作流自动化平台"},
+]
+
+
+def _extract_github_mentions(text: str):
+    """从文本抽取 github.com/owner/repo 提及，返回去重后的候选列表。"""
+    import re
+    found = re.findall(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", text or "")
+    seen = set()
+    out = []
+    for fr in found:
+        parts = fr.split("/")[:2]
+        if len(parts) < 2 or parts[1].lower().startswith("gist"):
+            continue
+        name = f"{parts[0]}/{parts[1]}"
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append({"name": name, "stars": "?", "lang": "?", "desc": "HN/arXiv 提及的开源项目"})
+    return out
+
+
+def _build_project_pool(gh_items, texts, target: int = 5):
+    """构建 projects 候选池：GitHub 优先，不足时从 HN/arXiv 提及 + 精选库补足，保证 >=target 个真实候选。"""
+    pool = [{
+        "name": (r.get("full_name") or r.get("name") or "").strip(),
+        "stars": r.get("stargazers_count", "?"),
+        "lang": r.get("language") or "?",
+        "desc": (r.get("description") or "")[:100],
+    } for r in gh_items if (r.get("full_name") or r.get("name"))]
+    pool = [p for p in pool if p["name"]]
+    seen = {p["name"] for p in pool}
+    for t in texts:
+        for c in _extract_github_mentions(t):
+            if c["name"] not in seen:
+                seen.add(c["name"])
+                pool.append(c)
+            if len(pool) >= target:
+                break
+        if len(pool) >= target:
+            break
+    for c in _CURATED_OSS:
+        if len(pool) >= target:
+            break
+        if c["name"] not in seen:
+            seen.add(c["name"])
+            pool.append(dict(c))
+    return pool
+
+
+# 报告级缓存：同一 (类型, 方向) 30 分钟内复用，避免重复触发慢生成（单次 ~100-170s）
+_REPORT_CACHE = {}
+_REPORT_CACHE_TTL = 1800.0
+
+
+async def ai_daily_report(direction: str = "数据科学") -> dict:
     """三源日报：GitHub + HN + arXiv"""
+    _ck = ("daily", direction)
+    _hit = _REPORT_CACHE.get(_ck)
+    if _hit is not None and (datetime.now().timestamp() - _hit[0]) < _REPORT_CACHE_TTL:
+        return _hit[1]
     today = datetime.now().strftime("%Y-%m-%d")
     since = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
     # Step 1: 并行获取三个数据源
     async def fetch_github():
-        async with httpx.AsyncClient(timeout=15, verify=False) as cli:
+        headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
+        async with httpx.AsyncClient(timeout=15, verify=certifi.where()) as cli:
             r = await cli.get("https://api.github.com/search/repositories", params={
                 "q": f"ai agent created:>{since}",
                 "sort": "stars", "order": "desc", "per_page": 10
-            })
+            }, headers=headers)
             if r.status_code != 200:
                 return []
             return r.json().get("items", [])
@@ -698,7 +1010,10 @@ async def ai_daily_report(direction: str = "数据科学") -> str:
         return await web_search("AI Agent 行业动态 本周", 5)
 
     gh_items, hn_text, arxiv_text, news_text = await asyncio.gather(
-        fetch_github(), fetch_hn(), fetch_arxiv(), fetch_news_web(),
+        _cached("daily_github", 600, fetch_github),
+        _cached("daily_hn", 600, fetch_hn),
+        _cached("daily_arxiv", 600, fetch_arxiv),
+        _cached("daily_news", 600, fetch_news_web),
         return_exceptions=True
     )
 
@@ -711,109 +1026,136 @@ async def ai_daily_report(direction: str = "数据科学") -> str:
     if isinstance(news_text, Exception):
         news_text = f"网页搜索失败: {news_text}"
 
-    # Step 2: 用 LLM 生成结构化日报
-    gh_summary = json.dumps([{
-        "name": r["full_name"],
-        "stars": r["stargazers_count"],
-        "lang": r.get("language") or "?",
-        "desc": (r.get("description") or "")[:100]
-    } for r in gh_items[:10]], ensure_ascii=False)
+    # Step 2: 注入用户真实数据 + 用 LLM 生成结构化日报
+    user_ctx = _user_job_context()
+
+    gh_summary = json.dumps(
+        _build_project_pool(gh_items, [hn_text, arxiv_text, news_text], target=5)[:8],
+        ensure_ascii=False
+    )
 
     # 方向描述从 DIRECTION_PROFILES 取，避免维护两份数据
     _profile = DIRECTION_PROFILES.get(direction, DIRECTION_PROFILES["数据科学"])
 
-    prompt = f"""你是 AI 行业分析师，为一位 {_profile} 生成个性化日报。
+    prompt = f"""你是 AI 行业分析师+求职顾问，为一位 {_profile} 生成深度个性化日报。
 
 📅 {today}
 
-📦 GitHub 7天新项目：
+{user_ctx}
+
+📦 开源项目候选（GitHub 7天热门 + HN/arXiv 提及，已为你补足到≥5个）：
 {gh_summary}
 
 🔥 HackerNews：
 {hn_text[:1200]}
 
 📚 arXiv：
-{arxiv_text[:1000]}
+{arxiv_text[:600]}
 
 🔎 网页搜索（行业动态）：
-{news_text[:1000]}
+{news_text[:600]}
 
-    要求——只输出一个 JSON 对象，不要任何 markdown 代码块或额外文字。结构严格如下：
+    要求——只输出一个 JSON 对象，不要任何 markdown 代码块或额外文字。结构严格如下（以下用单引号示意，你返回时请使用标准双引号 JSON）：
     {{
-      "intro": "一段 2-3 句的日报引言/概览，概括本周最值得关注的信号",
-      "top3": [
-        {{"title": "标题", "stars": "数字或字符串", "desc": "2-3 句为什么对他重要", "value": "求职价值(10字内)", "url": "原文链接或空字符串"}}
+      'intro': '一段 2-3 句的日报引言/概览，概括本周最值得关注的信号',
+      'top3': [
+        {{'title': '标题', 'stars': '数字或字符串', 'desc': '1 句说清对求职的价值（不超过40字）', 'value': '求职价值(10字内)', 'url': '原文链接或空字符串'}}
       ],
-      "projects": [
-        {{"name": "项目名", "stars": "数字或字符串", "lang": "语言", "desc": "一句话", "tag": "你的方向/MCP/多Agent 或空字符串"}}
+      'projects': [
+        {{'name': '项目名', 'stars': '数字或字符串', 'lang': '语言', 'desc': '一句话概述（不超过30字）', 'tag': '你的方向/MCP/多Agent 或空'}}
       ],
-      "industry": ["行业信号1", "行业信号2"],
-      "learning": ["学习建议1", "学习建议2"],
-      "roadmap": [
-        {{"name": "方向1", "heat": "🔥🔥🔥🔥🔥", "difficulty": "⭐⭐⭐", "reason": "岗位需求最大"}}
+      'bigtech': {{
+        'domestic': ['国内大厂动态1（含公司名+具体动作+对求职的影响）', '...'],
+        'international': ['海外动态1（含公司名+具体动作）', '...']
+      }},
+      'industry_news': [
+        {{'num': 1, 'title': '新闻标题', 'analysis': '1-2句洞察：为什么重要、对{direction}方向求职者有什么影响（不超过35字）'}}
       ],
-      "actions": [
-        {{"name": "行动1", "feasible": "高", "cycle": "1-2 周", "leverage": "⭐⭐⭐⭐⭐", "hint": "补充说明"}}
+      'learning_opportunities': [
+        {{'priority': '高/中/长朗', 'topic': '具体技术方向或技能', 'stack': '相关技术栈（如 LangChain/AutoGen/CrewAI）', 'rationale': '一句话（不超过30字）'}}
       ],
-      "weekly_focus": {{
-        "title": "本周落地步骤 · 具体主题",
-        "steps": [
-          "① 步骤一：具体动作｜推荐项目 owner/repo：一句话价值",
-          "② 步骤二：具体动作｜推荐项目 owner/repo：一句话价值",
-          "③ 步骤三：具体动作｜推荐项目 owner/repo：一句话价值",
-          "④ 步骤四：具体动作｜推荐项目 owner/repo：一句话价值"
+      'application_strategy': {{
+        'companies': ['建议投递的公司及理由（结合用户已投情况给出差异化建议）'],
+        'industries': ['建议关注的行业赛道及理由'],
+        'open_source': ['建议参与/贡献的开源项目及理由']
+      }},
+      'roadmap': [
+        {{'name': '方向1', 'heat': '🔥🔥🔥🔥🔥', 'difficulty': '⭐⭐⭐', 'reason': '岗位需求最大'}}
+      ],
+      'actions': [
+        {{'name': '行动1', 'feasible': '高', 'cycle': '1-2 周', 'leverage': '⭐⭐⭐⭐⭐', 'hint': '补充说明'}}
+      ],
+      'weekly_focus': {{
+        'title': '本周落地步骤 · 具体主题',
+        'steps': [
+          '① 步骤一：具体动作｜推荐项目 owner/repo：一句话价值',
+          '② 步骤二：具体动作｜推荐项目 owner/repo：一句话价值',
+          '③ 步骤三：具体动作｜推荐项目 owner/repo：一句话价值'
         ]
       }},
-      "interview_tips": [
-        "面试话术1",
-        "面试话术2"
+      'interview_tips': [
+        '面试话术1（可直接在面试中说）',
+        '面试话术2'
       ],
-      "one_liner": "本周一句话总结"
+      'one_liner': '本周一句话总结'
     }}
     规则：
-    - **每个字段都必须填写，不能为空列表或空字符串。** 如果某个方向确实没有足够信息，用通用建议填充，不能留空。
+    - 每个字段都必须填写，不能为空列表或空字符串。如果某个方向确实没有足够信息，用通用建议填充，不能留空。
     - intro 写一段流畅的引言，让读者快速了解本周核心动态。
-    - top3 选 2-3 条最值得关注的信息，优先 与{direction}方向相关的开源项目、招聘信号、求职资源。
-    - projects 来自上方 GitHub 列表，挑 8-10 个。desc 字段**必须用中文概述**（不要直接贴英文原文），用 1-2 句话说明这个项目是做什么的、对{direction}方向有什么价值。tag 仅对与{direction}密切相关的项目填"你的方向"/"MCP"/"多Agent"，其余留空。
-    - industry 从 GitHub/HN/网页搜索 提取求职/技术趋势信号 2-3 条（优先采用联网检索到的真实动态）。**必须填 2-3 条，不能空。**
-    - learning 给 2-3 条 actionable 建议，结合{direction}方向的求职需求。**必须填 2-3 条，不能空。**
-    - roadmap：给出 3-4 个与{direction}最相关的细分方向/技术栈，含热度、难度、推荐理由。**必须填 3-4 个，不能空。**
-    - actions：给出 3-4 个与{direction}相关的具体求职/学习行动，含可行性、周期、求职杠杆。**必须填 3-4 个，不能空。**
-    - weekly_focus：给出一个本周可落地的具体主题（与{direction}相关），3-4 个步骤。**每个步骤必须关联一个 GitHub 上的开源项目作为实践载体**，格式："① 步骤说明｜推荐项目 owner/repo：一句话价值"。**必须填，不能空。**
-    - interview_tips：给 2-3 条与{direction}相关的面试话术/简历关键词。**必须填 2-3 条，不能空。**
-    - one_liner：一句话总结本周核心信号。**必须填，不能空。**
+    - top3 选 2-3 条最值得关注的信息，优先与{direction}方向相关的开源项目、招聘信号。desc 用 1 句说清对求职的价值（不超过40字）。
+    - projects 来自上方已补足的项目候选列表（GitHub 热门 + HN/arXiv 提及），挑 5 个。desc 用中文一句话（不超过30字）。
+    - bigtech 分国内/海外，各 2 条，每条一句话（不超过40字）：公司名 + 具体做了什么 + 对求职者的实际影响。不要泛泛而谈。
+    - industry_news 是洞察板块（区别于简短的 industry）：选 3 条本周最重要的行业信号，每条只写 1-2 句洞察——为什么重要、对{direction}方向有什么影响（不超过 35 字）。重质不重量，写出判断而非堆字数。
+    - learning_opportunities 给 3 条学习方向建议，每条含：优先级(高/中/长朗)、具体主题、技术栈、一句话推荐理由（不超过30字）。结合用户当前投递情况给差异化建议。
+    - application_strategy 给精炼的投递策略：companies/industries/open_source 各 1-2 条，每条一句话（不超过40字）指明冲谁、关注什么、参与什么开源。这是用户最需要的行动指引，要具体。
+    - roadmap：3 个细分方向，含热度/难度/理由。
+    - actions：3 个具体行动，含可行性/周期/杠杆。
+    - weekly_focus：本周可落地主题，3 个步骤，每个步骤关联 GitHub 项目。
+    - interview_tips：2-3 条可直接说的面试话术。
+    - one_liner：一句话总结。
+
     只输出 JSON，不要解释。"""
 
-    try:
-        async with httpx.AsyncClient(timeout=60, verify=False) as cli:
-            r = await cli.post(
-                f"{BASE_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-                json={"model": MODEL, "messages": [{"role": "user", "content": prompt}],
-                      "max_tokens": 4096, "response_format": {"type": "json_object"}},
-            )
-            if r.status_code != 200:
-                return {"error": f"LLM 汇总失败: {r.status_code}"}
-            content = r.json()["choices"][0]["message"]["content"]
-        # 容错提取 JSON（去掉可能包裹的代码块标记）
-        import re
-        m = re.search(r"\{.*\}", content, re.DOTALL)
-        if not m:
-            return {"error": "日报 JSON 解析失败", "raw": content[:200]}
-        raw_json = m.group()
-        # 常见容错：去掉对象/数组末尾多余的逗号
-        raw_json = re.sub(r",(\s*[}\]])", r"\1", raw_json)
+    last_err = None
+    for _attempt in range(5):
         try:
-            data = json.loads(raw_json, strict=False)
-        except json.JSONDecodeError:
-            # 再试一次：去掉可能的 markdown 代码块标记
-            raw_json = re.sub(r"^\s*```json?\s*|\s*```\s*$", "", raw_json, flags=re.MULTILINE)
-            data = json.loads(raw_json, strict=False)
-        data["date"] = today
-        data["title"] = "AI 日报"
-        return _ensure_report_fields(data, direction)
-    except Exception as e:
-        return {"error": f"日报生成异常: {e}"}
+            # 网关偶发返回空内容：重试时轻微抖动温度以打破相关性
+            _temp = round(0.6 + 0.05 * _attempt, 2)
+            async with httpx.AsyncClient(timeout=90, verify=certifi.where()) as cli:
+                r = await cli.post(
+                    f"{BASE_URL}/chat/completions",
+                    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                    json={"model": MODEL, "messages": [{"role": "user", "content": prompt}],
+                          "max_tokens": 4096, "temperature": _temp,
+                          "response_format": {"type": "json_object"}},
+                )
+            if r.status_code != 200:
+                last_err = f"LLM 汇总失败: {r.status_code}"
+                await asyncio.sleep(2 * (_attempt + 1))
+                continue
+            _j = r.json()
+            _msg = (_j.get("choices", [{}])[0].get("message", {}) or {})
+            content = (_msg.get("content") or "")
+            if not content.strip():
+                _fr = _j.get("choices", [{}])[0].get("finish_reason")
+                last_err = f"模型返回空内容(网关偶发) finish={_fr}"
+                await asyncio.sleep(2 * (_attempt + 1))
+                continue
+            data = _parse_report_json(content)
+            if data is None:
+                last_err = "JSON 解析失败"
+                await asyncio.sleep(2 * (_attempt + 1))
+                continue
+            data["date"] = today
+            data["title"] = "AI 日报"
+            data["report_type"] = "daily"
+            _REPORT_CACHE[_ck] = (datetime.now().timestamp(), _ensure_report_fields(data, direction))
+            return _REPORT_CACHE[_ck][1]
+        except Exception as e:
+            last_err = f"日报生成异常: {e}"
+            await asyncio.sleep(2 * (_attempt + 1))
+            continue
+    return {"error": f"日报生成失败(重试耗尽): {last_err}"}
 
 
 def _ensure_report_fields(data: dict, direction: str) -> dict:
@@ -822,6 +1164,31 @@ def _ensure_report_fields(data: dict, direction: str) -> dict:
         "intro": f"本周 AI 领域持续活跃，{direction}方向机会涌现。以下为你精选最值得关注的信号与行动建议。",
         "top3": [],
         "projects": [],
+        "bigtech": {
+            "domestic": ["字节/阿里/腾讯等大厂持续加码 AI Agent 方向招聘", "国内 AI 创业团队融资活跃，校招/实习机会增加"],
+            "international": ["OpenAI/Google/Anthropic 持续发布新模型与 API", "海外 AI 产品商业化加速，远程岗位机会增多"]
+        },
+        "industry_news": [
+            {"num": 1, "title": f"{direction}方向持续火热，各厂商加速布局",
+             "analysis": f"从 GitHub 新项目数量和招聘需求来看，{direction}相关岗位稳中有升。建议关注头部公司的校招/实习岗位，同时通过开源项目积累实战经验。面试时可聊'我对{direction}方向的行业趋势有自己的判断'。"},
+            {"num": 2, "title": "LLM 应用工程化成为新热点",
+             "analysis": "从 RAG 到 Agent 到多智能体协作，LLM 正从'能对话'走向'能干活'。对数据科学背景的同学来说，这是很好的切入点——你既懂数据又懂模型，比纯算法或纯工程都有优势。"},
+            {"num": 3, "title": "开源项目是最佳简历加分项",
+             "analysis": "HR 和技术面试官越来越看重 GitHub 活动。与其刷题不如跑通一个有深度的开源项目，面试时能讲清楚'我做了什么、为什么这么做、遇到了什么问题怎么解决的'。"},
+        ],
+        "learning_opportunities": [
+            {"priority": "高", "topic": "Agent 框架实战（LangChain/AutoGen/CrewAI）",
+             "stack": "LangChain / AutoGen / CrewAI", "rationale": "面试高频 + 实际工作刚需"},
+            {"priority": "高", "topic": "Python + LLM API 开发",
+             "stack": "Python / OpenAI API / FastAPI", "rationale": "基本功底，所有公司都需要"},
+            {"priority": "中", "topic": "RAG 系统设计与实现",
+             "stack": "LangChain / Chroma / Elasticsearch", "rationale": "企业级应用最常见的技术栈"},
+        ],
+        "application_strategy": {
+            "companies": [f"大厂：字节(豆包)、阿里(通义)、百度(文心) 都在扩招 AI {direction} 方向", "创业公司：关注 Agent 工具链相关的早期项目，成长空间大", "外企：Anthropic/OpenAI 中国区如有岗位值得冲"],
+            "industries": ["AI 基础设施（模型服务/MCP平台）", "AI 应用层（客服/营销/代码生成）", "传统行业 AI 转型（金融/制造/医疗）"],
+            "open_source": ["给热门 Agent 项目提 PR 或 issue 是最好的简历加分项", "从文档/测试贡献开始，逐步深入核心代码"],
+        },
         "industry": ["AI Agent 方向持续火热，各厂商加速布局", f"{direction}相关岗位需求稳中有升，建议持续关注"],
         "learning": [f"精读 1 个与{direction}相关的开源项目 README 和核心代码", "整理本周 top3 信息为面试谈资", "在 GitHub 上 star 并跟进 2 个感兴趣的项目"],
         "roadmap": [
@@ -854,29 +1221,51 @@ def _ensure_report_fields(data: dict, direction: str) -> dict:
         val = data.get(key)
         if val is None or val == [] or val == {} or val == "":
             data[key] = default
-    # bigtech 仅在求职报告中存在
-    if "bigtech" in data:
-        bt = data["bigtech"]
-        if not isinstance(bt, dict) or not bt.get("domestic") or not bt.get("international"):
-            data["bigtech"] = {
-                "domestic": ["DeepSeek/字节/阿里等大厂持续加码 AI 方向招聘", "国内 AI 创业团队融资活跃，校招/实习机会增加"],
-                "international": ["OpenAI/Google/Anthropic 持续发布新模型与 API", "海外 AI 产品商业化加速，远程岗位机会增多"]
-            }
+    # 强制长度上限：无论模型超发多少，渲染都保持精简契约
+    _cap = {
+        "top3": 3, "projects": 5, "industry_news": 3, "learning_opportunities": 3,
+        "roadmap": 3, "actions": 3, "interview_tips": 3, "industry": 3, "learning": 3,
+    }
+    for _k, _n in _cap.items():
+        _v = data.get(_k)
+        if isinstance(_v, list) and len(_v) > _n:
+            data[_k] = _v[:_n]
+    _bt = data.get("bigtech")
+    if isinstance(_bt, dict):
+        for _side in ("domestic", "international"):
+            _bv = _bt.get(_side)
+            if isinstance(_bv, list) and len(_bv) > 2:
+                _bt[_side] = _bv[:2]
+    _as = data.get("application_strategy")
+    if isinstance(_as, dict):
+        for _side in ("companies", "industries", "open_source"):
+            _av = _as.get(_side)
+            if isinstance(_av, list) and len(_av) > 2:
+                _as[_side] = _av[:2]
+    _wf = data.get("weekly_focus")
+    if isinstance(_wf, dict) and isinstance(_wf.get("steps"), list) and len(_wf["steps"]) > 3:
+        _wf["steps"] = _wf["steps"][:3]
+    # bigtech 已在 defaults 中，无需单独兜底
     return data
 
 
 async def ai_job_report(direction: str = "数据科学") -> dict:
     """求职专题情报：大厂 AI 动态 + 招聘信号 + 开源项目 + 可投递方向"""
+    _ck = ("job", direction)
+    _hit = _REPORT_CACHE.get(_ck)
+    if _hit is not None and (datetime.now().timestamp() - _hit[0]) < _REPORT_CACHE_TTL:
+        return _hit[1]
     today = datetime.now().strftime("%Y-%m-%d")
     since = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
     # Step1: 并行获取数据源
     async def fetch_github():
-        async with httpx.AsyncClient(timeout=15, verify=False) as cli:
+        headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
+        async with httpx.AsyncClient(timeout=15, verify=certifi.where()) as cli:
             r = await cli.get("https://api.github.com/search/repositories", params={
                 "q": f"AI agent OR LLM OR agentic created:>{since}",
                 "sort": "stars", "order": "desc", "per_page": 12
-            })
+            }, headers=headers)
             if r.status_code != 200:
                 return []
             return r.json().get("items", [])
@@ -887,7 +1276,12 @@ async def ai_job_report(direction: str = "数据科学") -> dict:
     async def fetch_news_job():
         return await web_search("大厂 AI 动态 招聘 本周", 6)
 
-    gh_items, hn_text, news_text = await asyncio.gather(fetch_github(), fetch_hn(), fetch_news_job(), return_exceptions=True)
+    gh_items, hn_text, news_text = await asyncio.gather(
+        _cached("job_github", 600, fetch_github),
+        _cached("job_hn", 600, fetch_hn),
+        _cached("job_news", 600, fetch_news_job),
+        return_exceptions=True
+    )
     if isinstance(gh_items, Exception):
         gh_items = []
     if isinstance(hn_text, Exception):
@@ -896,103 +1290,170 @@ async def ai_job_report(direction: str = "数据科学") -> dict:
         news_text = f"网页搜索失败: {news_text}"
 
     # Step2: 用 LLM 生成结构化求职情报
-    gh_summary = json.dumps([{
-        "name": r["full_name"],
-        "stars": r["stargazers_count"],
-        "lang": r.get("language") or "?",
-        "desc": (r.get("description") or "")[:100]
-    } for r in gh_items[:12]], ensure_ascii=False)
+    gh_summary = json.dumps(
+        _build_project_pool(gh_items, [hn_text, news_text], target=5)[:10],
+        ensure_ascii=False
+    )
+
+    # 注入用户真实投递画像，做差异化建议
+    user_ctx = _user_job_context()
 
     prompt = f"""你是 AI 求职情报分析师，为一位 2027 届 {direction} 方向本科生生成求职专题情报。
 
 📅 {today}
 
-📦 GitHub 7天热门 AI/Agent 项目：
+{user_ctx}
+
+📦 开源项目候选（GitHub 7天热门 + HN/arXiv 提及，已为你补足到≥5个）：
 {gh_summary}
 
 🔥 HackerNews：
 {hn_text[:1200]}
 
 🔎 网页搜索（大厂 AI 动态/招聘）：
-{news_text[:1500]}
+{news_text[:900]}
 
-要求——只输出一个 JSON 对象，不要任何 markdown 代码块或额外文字。结构严格如下：
+要求——只输出一个 JSON 对象，不要任何 markdown 代码块或额外文字。结构严格如下（以下用单引号示意，你返回时请使用标准双引号 JSON）：
 {{
-  "intro": "2-3 句概览，点明本周最值得关注的求职信号",
-  "top3": [
-    {{"title": "标题", "stars": "数字或字符串", "desc": "2-3 句为什么对求职重要", "value": "求职价值(10字内)", "url": "原文链接或空字符串"}}
+  'intro': '2-3 句概览，点明本周最值得关注的求职信号',
+  'top3': [
+    {{'title': '标题', 'stars': '数字或字符串', 'desc': '1 句说清对求职的价值（不超过40字）', 'value': '求职价值(10字内)', 'url': '原文链接或空字符串'}}
   ],
-  "projects": [
-    {{"name": "项目名", "stars": "数字或字符串", "lang": "语言", "desc": "一句话", "tag": "你的方向/MCP/多Agent 或空字符串"}}
+  'projects': [
+    {{'name': '项目名', 'stars': '数字或字符串', 'lang': '语言', 'desc': '一句话（不超过30字）', 'tag': '你的方向/MCP/多Agent 或空字符串'}}
   ],
-  "bigtech": {{
-    "domestic": ["国内大厂 AI 动态1", "国内大厂 AI 动态2"],
-    "international": ["国际 AI 动态1", "国际 AI 动态2"]
+  'bigtech': {{
+    'domestic': ['国内大厂 AI 动态1', '国内大厂 AI 动态2'],
+    'international': ['国际 AI 动态1', '国际 AI 动态2']
   }},
-  "industry": ["行业趋势/招聘信号1", "行业趋势/招聘信号2"],
-  "learning": ["学习/投递建议1", "学习/投递建议2"],
-  "roadmap": [
-    {{"name": "方向1", "heat": "🔥🔥🔥🔥🔥", "difficulty": "⭐⭐⭐", "reason": "岗位需求最大"}}
+  'industry_news': [
+    {{'num': 1, 'title': '新闻标题', 'analysis': '1-2句洞察：为什么重要、对求职者的影响（不超过35字）'}}
   ],
-  "actions": [
-    {{"name": "行动1", "feasible": "高", "cycle": "1-2 周", "leverage": "⭐⭐⭐⭐⭐", "hint": "补充说明"}}
+  'learning_opportunities': [
+    {{'priority': '高/中/长朗', 'topic': '具体技术方向或技能', 'stack': '相关技术栈（如 LangChain/AutoGen/CrewAI）', 'rationale': '一句话（不超过30字）'}}
   ],
-  "weekly_focus": {{
-    "title": "本周落地步骤 · 具体主题",
-    "steps": [
-      "① 步骤一：具体动作｜推荐项目 owner/repo：一句话价值",
-      "② 步骤二：具体动作｜推荐项目 owner/repo：一句话价值",
-      "③ 步骤三：具体动作｜推荐项目 owner/repo：一句话价值",
-      "④ 步骤四：具体动作｜推荐项目 owner/repo：一句话价值"
+  'application_strategy': {{
+    'companies': ['建议投递的公司及理由（结合用户已投情况给出差异化建议）'],
+    'industries': ['建议关注的行业赛道及理由'],
+    'open_source': ['建议参与/贡献的开源项目及理由']
+  }},
+  'industry': ['行业趋势/招聘信号1', '行业趋势/招聘信号2'],
+  'learning': ['学习/投递建议1', '学习/投递建议2'],
+  'roadmap': [
+    {{'name': '方向1', 'heat': '🔥🔥🔥🔥🔥', 'difficulty': '⭐⭐⭐', 'reason': '岗位需求最大'}}
+  ],
+  'actions': [
+    {{'name': '行动1', 'feasible': '高', 'cycle': '1-2 周', 'leverage': '⭐⭐⭐⭐⭐', 'hint': '补充说明'}}
+  ],
+  'weekly_focus': {{
+    'title': '本周落地步骤 · 具体主题',
+    'steps': [
+      '① 步骤一：具体动作｜推荐项目 owner/repo：一句话价值',
+      '② 步骤二：具体动作｜推荐项目 owner/repo：一句话价值',
+      '③ 步骤三：具体动作｜推荐项目 owner/repo：一句话价值'
     ]
   }},
-  "interview_tips": [
-    "面试话术1",
-    "面试话术2"
+  'interview_tips': [
+    '面试话术1',
+    '面试话术2'
   ],
-  "one_liner": "本周一句话总结"
+  'one_liner': '本周一句话总结'
 }}
 规则：
 - **每个字段都必须填写，不能为空列表或空字符串。** 如果某个方向确实没有足够信息，用通用建议填充，不能留空。
-- top3 选 2-3 条最值得关注的信息，优先大厂招聘信号、Agent 开源项目、求职资源。
-- projects 来自上方 GitHub 列表，挑 8-10 个，tag 仅对 Agent/MCP/多Agent 相关项目填"你的方向"/"MCP"/"多Agent"，其余留空。
-- bigtech：优先基于上方【网页搜索】的真实检索结果，总结本周大厂 AI 战略/招聘/产品动向（国内 DeepSeek/字节/阿里/百度/腾讯，国际 OpenAI/Google/Anthropic 等）；若联网检索不可用，再退回到公开已知信息补充。国内归 domestic、国际归 international，各 2-3 条。**必须填，不能空。**
-- industry 从 GitHub/HN 提取求职/技术/招聘趋势信号 2-3 条。**必须填 2-3 条，不能空。**
-- learning 给 2-3 条 actionable 的求职/学习建议。**必须填 2-3 条，不能空。**
-- roadmap：给出 3-4 个与{direction}最相关的细分方向/技术栈，含热度、难度、推荐理由。**必须填 3-4 个，不能空。**
-- actions：给出 3-4 个与{direction}相关的具体求职/学习行动，含可行性、周期、求职杠杆。**必须填 3-4 个，不能空。**
-- weekly_focus：给出一个本周可落地的具体主题（与{direction}相关），3-4 个步骤。**每个步骤必须关联一个 GitHub 上的开源项目作为实践载体**，格式："① 步骤说明｜推荐项目 owner/repo：一句话价值"。**必须填，不能空。**
+- top3 选 2-3 条最值得关注的信息，优先大厂招聘信号、Agent 开源项目、求职资源。desc 用 1 句说清对求职的价值（不超过40字）。
+- projects 来自上方已补足的项目候选列表（GitHub 热门 + HN/arXiv 提及），挑 5 个。tag 仅对 Agent/MCP/多Agent 相关项目填你的方向/MCP/多Agent，其余留空。desc 一句话（不超过30字）。
+- bigtech：优先基于上方【网页搜索】的真实检索结果，总结本周大厂 AI 战略/招聘/产品动向（国内 DeepSeek/字节/阿里/百度/腾讯，国际 OpenAI/Google/Anthropic 等）；若联网检索不可用，再退回到公开已知信息补充。国内归 domestic、国际归 international，各 2 条，每条一句话（不超过40字）。**必须填，不能空。**
+- industry 从 GitHub/HN 提取求职/技术/招聘趋势信号 2-3 条，每条（不超过40字）。**必须填 2-3 条，不能空。**
+- learning 给 2-3 条 actionable 的求职/学习建议，每条（不超过40字）。**必须填 2-3 条，不能空。**
+- industry_news 选 3 条本周最重要的行业/招聘信号，每条只写 1-2 句洞察——为什么重要、对求职者有什么影响（不超过35字）。重质不重量。
+- learning_opportunities 给 3 条学习方向建议，每条含：优先级(高/中/长朗)、具体主题、技术栈、一句话推荐理由（不超过30字）。结合用户已投情况给差异化建议。
+- application_strategy 给精炼投递策略：companies/industries/open_source 各 1-2 条，每条一句话（不超过40字）指明冲谁、关注什么、参与什么开源。这是用户最需要的行动指引，要具体。
+- roadmap：给出 3 个与{direction}最相关的细分方向/技术栈，含热度、难度、推荐理由。**必须填 3 个，不能空。**
+- actions：给出 3 个与{direction}相关的具体求职/学习行动，含可行性、周期、求职杠杆。**必须填 3 个，不能空。**
+- weekly_focus：给出一个本周可落地的具体主题（与{direction}相关），3 个步骤。**每个步骤必须关联一个 GitHub 上的开源项目作为实践载体**，格式："① 步骤说明｜推荐项目 owner/repo：一句话价值"。**必须填，不能空。**
 - interview_tips：给 2-3 条与{direction}相关的面试话术/简历关键词。**必须填 2-3 条，不能空。**
 - one_liner：一句话总结本周核心求职信号。**必须填，不能空。**
 只输出 JSON，不要解释。"""
 
-    try:
-        async with httpx.AsyncClient(timeout=60, verify=False) as cli:
-            r = await cli.post(
-                f"{BASE_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-                json={"model": MODEL, "messages": [{"role": "user", "content": prompt}],
-                      "max_tokens": 4096, "response_format": {"type": "json_object"}},
-            )
-            if r.status_code != 200:
-                return {"error": f"LLM 汇总失败: {r.status_code}"}
-            content = r.json()["choices"][0]["message"]["content"]
-        import re
-        m = re.search(r"\{.*\}", content, re.DOTALL)
-        if not m:
-            return {"error": "岗位情报 JSON 解析失败", "raw": content[:200]}
-        raw_json = m.group()
-        raw_json = re.sub(r",(\s*[}\]])", r"\1", raw_json)
+    last_err = None
+    for _attempt in range(5):
         try:
-            data = json.loads(raw_json, strict=False)
-        except json.JSONDecodeError:
-            raw_json = re.sub(r"^\s*```json?\s*|\s*```\s*$", "", raw_json, flags=re.MULTILINE)
-            data = json.loads(raw_json, strict=False)
-        data["date"] = today
-        data["title"] = "AI 岗位情报"
-        return _ensure_report_fields(data, direction)
-    except Exception as e:
-        return {"error": f"岗位情报生成异常: {e}"}
+            # 网关偶发返回空内容：重试时轻微抖动温度以打破相关性
+            _temp = round(0.6 + 0.05 * _attempt, 2)
+            async with httpx.AsyncClient(timeout=90, verify=certifi.where()) as cli:
+                r = await cli.post(
+                    f"{BASE_URL}/chat/completions",
+                    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                    json={"model": MODEL, "messages": [{"role": "user", "content": prompt}],
+                          "max_tokens": 4096, "temperature": _temp,
+                          "response_format": {"type": "json_object"}},
+                )
+            if r.status_code != 200:
+                last_err = f"LLM 汇总失败: {r.status_code}"
+                await asyncio.sleep(2 * (_attempt + 1))
+                continue
+            _j = r.json()
+            _msg = (_j.get("choices", [{}])[0].get("message", {}) or {})
+            content = (_msg.get("content") or "")
+            if not content.strip():
+                _fr = _j.get("choices", [{}])[0].get("finish_reason")
+                last_err = f"模型返回空内容(网关偶发) finish={_fr}"
+                await asyncio.sleep(2 * (_attempt + 1))
+                continue
+            data = _parse_report_json(content)
+            if data is None:
+                last_err = "JSON 解析失败"
+                await asyncio.sleep(2 * (_attempt + 1))
+                continue
+            data["date"] = today
+            data["title"] = "AI 岗位情报"
+            data["report_type"] = "job"
+            _REPORT_CACHE[_ck] = (datetime.now().timestamp(), _ensure_report_fields(data, direction))
+            return _REPORT_CACHE[_ck][1]
+        except Exception as e:
+            last_err = f"岗位情报生成异常: {e}"
+            await asyncio.sleep(2 * (_attempt + 1))
+            continue
+    return {"error": f"岗位情报生成失败(重试耗尽): {last_err}"}
+
+
+async def run_sentinel() -> str:
+    """执行一次秋招哨兵扫描，返回人类可读摘要（供 LLM 转述 / 口令直接返回）。"""
+    from job_sentinel.scan import scan_and_match
+    from pathlib import Path
+    base = Path(__file__).parent
+    try:
+        res = await scan_and_match(
+            db_path=str(DB_PATH),
+            profile_path=str(base / "job_sentinel" / "profile.json"),
+            seed_path=str(base / "job_sentinel" / "seed_jobs.json"),
+        )
+    except Exception as e:  # noqa: BLE001
+        return f"⚠️ 哨兵扫描失败: {e}"
+    top = res["top"][:5]
+    lines = [f"✅ 秋招哨兵扫描完成：采集 {res['collected']} 条，匹配入库 {res['kept']} 条（新增 {res['new']}）"]
+    for j in top:
+        city = j.get("city") or "地点未知"
+        lines.append(f"· [{j.get('match_score')}分] {j.get('company')} · {j.get('title')} · {city} · {j.get('batch')}｜{j.get('match_reason')}")
+    lines.append("打开「岗位哨兵」页面查看全部，并可一键标记投递状态。")
+    return "\n".join(lines)
+
+
+async def job_sentinel_scan() -> str:
+    """工具入口：供 LLM 工具循环调用（与 run_sentinel 同实现）。"""
+    return await run_sentinel()
+
+
+async def job_sync_email(text: str = "") -> str:
+    """工具入口：解析一封投递确认/笔试/面试/offer/拒信邮件，自动回写岗位状态。
+
+    用户把邮件正文粘贴过来并说「解析这封邮件」，或 QQ 邮箱自动转发到本地址时触发。
+    """
+    from job_sentinel.email_sync import sync_email_text
+    if not text or not text.strip():
+        return "请提供邮件正文（直接粘贴内容），或把投递确认邮件转发到本地址自动解析。"
+    return sync_email_text(text, str(DB_PATH))
 
 
 TOOL_MAP = {
@@ -1008,6 +1469,8 @@ TOOL_MAP = {
     "kb_add": kb_add,
     "kb_search": kb_search,
     "kb_stats": kb_stats,
+    "job_sentinel_scan": job_sentinel_scan,
+    "job_sync_email": job_sync_email,
 }
 
 
@@ -1015,8 +1478,11 @@ TOOL_MAP = {
 # 核心聊天逻辑（带记忆）
 # ============================================================
 def _match_report_trigger(text: str):
-    """识别按需报告口令，返回 'daily' / 'job' / None（不区分大小写）。"""
+    """识别按需报告口令，返回 'daily' / 'job' / 'sentinel' / None（不区分大小写）。"""
     t = (text or "").lower()
+    sentinel_kw = ("扫岗位", "查秋招", "找岗位", "岗位哨兵", "查岗位", "秋招岗位", "找秋招", "招聘信息")
+    if any(k in t for k in sentinel_kw):
+        return "sentinel"
     job_kw = ("求职报告", "岗位报告", "招聘报告", "job report", "求职日报")
     daily_kw = ("日报", "daily", "推日报", "发日报", "来份日报", "每日日报",
                 "生成日报", "给我日报", "ai日报", "推送日报")
@@ -1025,6 +1491,20 @@ def _match_report_trigger(text: str):
     if any(k in t for k in daily_kw):
         return "daily"
     return None
+
+
+def _match_email_trigger(text: str) -> bool:
+    """识别「解析/同步投递邮件」口令，或判断文本本身就是一封投递状态邮件。"""
+    t = (text or "").lower()
+    kw = ("解析投递邮件", "解析邮件", "同步投递", "同步投递状态", "同步邮件",
+          "投递进度同步", "识别投递邮件", "解析这封邮件", "这封邮件")
+    if any(k in t for k in kw):
+        return True
+    try:
+        from job_sentinel.email_sync import is_delivery_email
+        return is_delivery_email(t)
+    except Exception:
+        return False
 
 
 async def process_chat(message: str, session_id: str = "default", direction: str = "数据科学") -> str:
@@ -1046,6 +1526,13 @@ async def process_chat(message: str, session_id: str = "default", direction: str
     # ── 按需报告口令：用户喊一声即推送（确定触发，不依赖 LLM 工具选择）──
     # 命中则直接生成报告并渲染 HTML，由 adapter 回邮件 = 推送到手机。
     _trig = _match_report_trigger(message)
+    if _trig == "sentinel":
+        try:
+            _text = await run_sentinel()
+            save_message(session_id, "assistant", _text)
+            return _text
+        except Exception as _e:
+            logger.warning(f"哨兵扫描失败，转普通对话: {_e}")
     if _trig:
         try:
             import report_html
@@ -1062,12 +1549,35 @@ async def process_chat(message: str, session_id: str = "default", direction: str
         except Exception as _e:
             logger.warning(f"口令报告生成失败，转普通对话: {_e}")
 
+    # ── 聊天一句话状态更新 ──
+    # "启云方进笔试了" / "小米挂了" / "字节oc了" / "烽火面试了"
+    # 在邮件解析之前拦截，因为一句话更新更轻量、更常用
+    try:
+        from job_sentinel.email_sync import sync_chat_status
+        _chat_up = sync_chat_status(message, str(DB_PATH))
+        if _chat_up:
+            save_message(session_id, "assistant", _chat_up)
+            return _chat_up
+    except Exception as _e:
+        logger.warning(f"聊天状态更新失败，转普通对话: {_e}")
+
+    # ── 投递邮件自动解析：QQ 邮箱转发 / 用户粘贴的投递确认邮件 ──
+    # 命中（口令或强信号启发式）即解析并回写岗位状态，返回汇总（自动推到手机）。
+    if _match_email_trigger(message):
+        try:
+            from job_sentinel.email_sync import sync_email_text
+            _text = sync_email_text(message, str(DB_PATH))
+            save_message(session_id, "assistant", _text)
+            return _text
+        except Exception as _e:
+            logger.warning(f"投递邮件解析失败，转普通对话: {_e}")
+
     # 限制长度
     if len(history) > 30:
         history = [history[0]] + history[-29:]
 
     try:
-        async with httpx.AsyncClient(timeout=120, verify=False) as cli:
+        async with httpx.AsyncClient(timeout=120, verify=certifi.where()) as cli:
             payload = {"model": MODEL, "messages": history, "tools": TOOLS, "tool_choice": "auto", "max_tokens": 4096, "stream": False}
 
             r = await cli.post(
@@ -1094,11 +1604,15 @@ async def process_chat(message: str, session_id: str = "default", direction: str
                     except json.JSONDecodeError:
                         fn_args = {}
                     fn = TOOL_MAP.get(fn_name)
-                    # 日报/求职报告需传入用户方向，LLM 不会传此参数
-                    if fn_name in ("ai_daily_report", "ai_job_report"):
-                        result = await fn(direction=direction) if fn else f"未知工具: {fn_name}"
-                    else:
-                        result = await fn(**fn_args) if fn else f"未知工具: {fn_name}"
+                    try:
+                        # 日报/求职报告需传入用户方向，LLM 不会传此参数
+                        if fn_name in ("ai_daily_report", "ai_job_report"):
+                            result = await fn(direction=direction) if fn else f"未知工具: {fn_name}"
+                        else:
+                            result = await fn(**fn_args) if fn else f"未知工具: {fn_name}"
+                    except Exception as _te:
+                        result = f"[工具执行失败] {fn_name}: {_te}"
+                        logger.warning(f"工具 {fn_name} 执行异常，已回灌模型: {_te}")
 
                     # 日报走模板渲染分支：结构化数据 -> HTML，直接返回，跳过 LLM 二次加工
                     if fn_name in ("ai_daily_report", "ai_job_report") and isinstance(result, dict):
@@ -1120,15 +1634,31 @@ async def process_chat(message: str, session_id: str = "default", direction: str
                     history.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
                 payload["messages"] = history
-                r = await cli.post(
-                    f"{BASE_URL}/chat/completions",
-                    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-                    json=payload,
-                )
-                if r.status_code != 200:
-                    return f"API 错误 ({r.status_code})"
+                _ok = False
+                r = None
+                for _attempt in range(3):
+                    try:
+                        r = await cli.post(
+                            f"{BASE_URL}/chat/completions",
+                            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                            json=payload,
+                        )
+                        if r.status_code == 200:
+                            _ok = True
+                            break
+                        if r.status_code == 429:
+                            await asyncio.sleep(1 * (_attempt + 1))
+                            continue
+                        break
+                    except (httpx.TimeoutException, httpx.ConnectError):
+                        await asyncio.sleep(1 * (_attempt + 1))
+                        continue
+                if not _ok:
+                    return f"API 错误 ({getattr(r, 'status_code', '?')}): {getattr(r, 'text', '')[:300]}"
                 data = r.json()
                 msg = data["choices"][0]["message"]
+            if msg.get("tool_calls"):
+                logger.warning("工具调用达 5 轮上限，直接生成最终回答")
 
             # 工具循环已结束，用清洗后的 history 发一次不带 tools 的最终请求，
             # 彻底消除模型在 content 里模拟工具调用的可能
@@ -1151,6 +1681,8 @@ async def process_chat(message: str, session_id: str = "default", direction: str
             raw_content = msg.get("content")
             reasoning = msg.get("reasoning_content")
             reply = raw_content if raw_content else (reasoning if reasoning else "（模型未返回内容，请重试）")
+            # 裁掉模型把思考过程混入 content 的开头文本
+            reply = _strip_reasoning(reply)
             history.append({"role": "assistant", "content": reply})
 
             # 对话已落库（user 在开头存、assistant 在此存、tool 在循环里存）
@@ -1167,12 +1699,25 @@ async def process_chat(message: str, session_id: str = "default", direction: str
 # ============================================================
 # 流式对话（SSE）：字逐字蹦出，立即有反馈，降低"思考太久"的体感
 # ============================================================
+# deepseek-v4-flash 经代理网关把"思考过程"放在独立的 reasoning_content 字段，
+# 真正的回答在 content 字段。流式只取 content，绝不泄露推理。
+def _strip_reasoning(text: str) -> str:
+    """兜底：若 content 仍夹带少量推理前缀，裁掉开头直到正文（首个加粗/标题）。"""
+    t = text.strip()
+    if not (t.startswith("我们注意到") or t.startswith("根据") or t.startswith("注意")
+            or t.startswith("用户") or t.startswith("回答要点") or t.startswith("首先")):
+        return text
+    m = re.search(r"\*\*[^*]{3,}\*\*", t) or re.search(r"\n#{1,6}\s", t)
+    return t[m.start():] if m else text
+
 async def _stream_tokens(cli, history, with_tools=False):
     """向 DeepSeek 发起流式请求，逐块 yield 文本增量。"""
     payload = {"model": MODEL, "messages": history, "max_tokens": 4096, "stream": True}
     if with_tools:
         payload["tools"] = TOOLS
         payload["tool_choice"] = "auto"
+    full_content = ""
+    fallback_reasoning = ""
     async with cli.stream("POST", f"{BASE_URL}/chat/completions",
                           headers=AUTH_HEADERS, json=payload) as resp:
         async for line in resp.aiter_lines():
@@ -1188,11 +1733,17 @@ async def _stream_tokens(cli, history, with_tools=False):
             if not obj.get("choices"):
                 continue
             delta = obj["choices"][0].get("delta", {})
-            # 优先 content；如果 content 为空则 fallback 到 reasoning_content
-            # （deepseek-v4-flash 有时只输出 reasoning_content）
-            text = delta.get("content") or delta.get("reasoning_content", "")
-            if text:
-                yield text
+            # 只输出 content；reasoning_content 是模型内部思考，绝不输出给用户
+            c = delta.get("content") or ""
+            r = delta.get("reasoning_content") or ""
+            if c:
+                full_content += c
+                yield c
+            elif r:
+                fallback_reasoning += r
+    # 极端情况：整段 content 为空，退而用 reasoning_content 兜底
+    if not full_content and fallback_reasoning:
+        yield fallback_reasoning
 
 
 def _compress_tool_history(history):
@@ -1269,18 +1820,30 @@ async def stream_chat(message: str, session_id: str = "default", direction: str 
             logger.warning(f"口令报告生成失败，转普通对话: {_e}")
 
     # —— 普通对话 ——
-    async with httpx.AsyncClient(timeout=120, verify=False) as cli:
+    async with httpx.AsyncClient(timeout=120, verify=certifi.where()) as cli:
         # 工具循环：最多 5 轮，确保最终回答前不再残留 tool_calls
         for _ in range(5):
             probe = {"model": MODEL, "messages": history, "tools": TOOLS,
                      "tool_choice": "auto", "max_tokens": 4096, "stream": False}
-            try:
-                r = await cli.post(f"{BASE_URL}/chat/completions", headers=AUTH_HEADERS, json=probe)
-            except Exception as e:
-                yield ev({"type": "error", "text": f"出错了: {e}"})
-                return
-            if r.status_code != 200:
+            _ok = False
+            for _attempt in range(3):
+                try:
+                    r = await cli.post(f"{BASE_URL}/chat/completions", headers=AUTH_HEADERS, json=probe)
+                except (httpx.TimeoutException, httpx.ConnectError) as e:
+                    if _attempt < 2:
+                        await asyncio.sleep(1 * (_attempt + 1))
+                        continue
+                    yield ev({"type": "error", "text": f"出错了: {e}"})
+                    return
+                if r.status_code == 200:
+                    _ok = True
+                    break
+                if r.status_code == 429:
+                    await asyncio.sleep(1 * (_attempt + 1))
+                    continue
                 yield ev({"type": "error", "text": f"API 错误 ({r.status_code}): {r.text[:200]}"})
+                return
+            if not _ok:
                 return
             msg = r.json()["choices"][0]["message"]
 
@@ -1296,10 +1859,14 @@ async def stream_chat(message: str, session_id: str = "default", direction: str 
                 except json.JSONDecodeError:
                     fn_args = {}
                 fn = TOOL_MAP.get(fn_name)
-                if fn_name in ("ai_daily_report", "ai_job_report"):
-                    result = await fn(direction=direction) if fn else f"未知工具: {fn_name}"
-                else:
-                    result = await fn(**fn_args) if fn else f"未知工具: {fn_name}"
+                try:
+                    if fn_name in ("ai_daily_report", "ai_job_report"):
+                        result = await fn(direction=direction) if fn else f"未知工具: {fn_name}"
+                    else:
+                        result = await fn(**fn_args) if fn else f"未知工具: {fn_name}"
+                except Exception as _te:
+                    result = f"[工具执行失败] {fn_name}: {_te}"
+                    logger.warning(f"工具 {fn_name} 执行异常，已回灌模型: {_te}")
 
                 if fn_name in ("ai_daily_report", "ai_job_report") and isinstance(result, dict):
                     if result.get("error"):
@@ -1339,6 +1906,26 @@ async def stream_chat(message: str, session_id: str = "default", direction: str 
 # ============================================================
 # FastAPI 路由
 # ============================================================
+async def require_auth(request: Request,
+                      authorization: Optional[str] = Header(None),
+                      x_token: Optional[str] = Header(None)):
+    """校验 /chat 访问令牌：支持 Authorization: Bearer <TOKEN> / X-Token / ?token= 三种方式。"""
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    elif x_token:
+        token = x_token
+    else:
+        token = request.query_params.get("token")
+    if not token or token != WEB_TOKEN:
+        raise HTTPException(status_code=401, detail="未授权：缺少或错误的访问令牌")
+    return True
+
+
+# 注：/api/token 已移除——WEB_TOKEN 改为服务端渲染注入 index.html/jobs.html（__WEB_TOKEN__ 占位），
+# 前端不再 fetch 该端点，本机任意进程无法再领到有效令牌（详见 serve_index / serve_jobs）。
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = "default"
@@ -1349,13 +1936,17 @@ class ChatResponse(BaseModel):
     session_id: str
 
 @app.post("/chat")
-async def chat_endpoint(req: ChatRequest):
+async def chat_endpoint(req: ChatRequest, _: bool = Depends(require_auth)):
     reply = await process_chat(req.message, req.session_id, req.direction)
-    return ChatResponse(reply=reply, session_id=req.session_id)
+    # process_chat 在日报/求职报告分支返回 dict({"text","html"})，
+    # ChatResponse.reply 为 str，需兼容以免 500
+    if isinstance(reply, dict):
+        reply = reply.get("text") or reply.get("html") or str(reply)
+    return ChatResponse(reply=str(reply), session_id=req.session_id)
 
 
 @app.post("/chat/stream")
-async def chat_stream_endpoint(req: ChatRequest):
+async def chat_stream_endpoint(req: ChatRequest, _: bool = Depends(require_auth)):
     async def safe_stream():
         """包装 stream_chat，捕获所有未处理异常转为 SSE error 事件"""
         try:
@@ -1374,9 +1965,13 @@ async def chat_stream_endpoint(req: ChatRequest):
 @app.get("/", response_class=HTMLResponse)
 async def index():
     p = static_dir / "index.html"
-    return HTMLResponse(p.read_text("utf-8") if p.exists() else "<h1>Hermes Sentinel</h1>")
+    if not p.exists():
+        return HTMLResponse("<h1>Hermes Sentinel</h1>")
+    # 注入 WEB_TOKEN 到占位符，前端不再需要 fetch /api/token（避免本机任意进程领 token）
+    html = p.read_text("utf-8").replace("__WEB_TOKEN__", WEB_TOKEN)
+    return HTMLResponse(html)
 
-@app.post("/reset")
+@app.post("/reset", dependencies=[Depends(require_auth)])
 async def reset(session_id: str = "default"):
     with get_db() as db:
         db.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
@@ -1409,7 +2004,7 @@ def _dashboard_data() -> dict:
 
             rows = db.execute(
                 "SELECT role, content, created_at, tool_name FROM conversations "
-                "WHERE role != 'tool' ORDER BY created_at DESC LIMIT 20"
+                "WHERE role != 'tool' ORDER BY created_at DESC, rowid DESC LIMIT 20"
             ).fetchall()
             data["recent"] = [{
                 "role": r["role"],
@@ -1463,6 +2058,126 @@ async def dashboard_page():
 
 
 # ============================================================
+# 秋招哨兵（岗位卡片流 + 投递追踪 + 画像配置）
+# ============================================================
+@app.get("/jobs", response_class=HTMLResponse)
+async def jobs_page():
+    p = static_dir / "jobs.html"
+    if not p.exists():
+        return HTMLResponse("<h1>岗位哨兵</h1>")
+    # 注入 WEB_TOKEN 到占位符，前端不再需要 fetch /api/token
+    html = p.read_text("utf-8").replace("__WEB_TOKEN__", WEB_TOKEN)
+    return HTMLResponse(html)
+
+
+@app.get("/api/jobs")
+async def api_jobs(status: str = "", batch: str = "", city: str = "", min_score: int = 0):
+    from job_sentinel.store import get_db as js_get_db, get_jobs
+    with js_get_db(str(DB_PATH)) as c:
+        jobs = get_jobs(c, {"status": status, "batch": batch, "city": city, "min_score": min_score})
+    return {"jobs": [j.to_dict() for j in jobs], "count": len(jobs)}
+
+
+@app.post("/api/jobs/{raw_hash}/status", dependencies=[Depends(require_auth)])
+async def api_job_status(raw_hash: str, request: Request):
+    data = await request.json()
+    status = (data or {}).get("status", "新")
+    from job_sentinel.store import get_db as js_get_db, update_status
+    with js_get_db(str(DB_PATH)) as c:
+        update_status(c, raw_hash, status)
+    return {"ok": True, "raw_hash": raw_hash, "status": status}
+
+
+@app.post("/api/extension/apply")
+async def api_extension_apply(request: Request):
+    """浏览器扩展上报：网申提交后把公司+岗位写入投递记录(状态=已投)。"""
+    auth = request.headers.get("Authorization", "")
+    token = auth.replace("Bearer ", "", 1).strip()
+    if token != EXT_TOKEN:
+        return JSONResponse(status_code=401, content={"ok": False, "error": "unauthorized"})
+    data = await request.json()
+    company = (data or {}).get("company", "").strip()
+    title = (data or {}).get("title", "").strip()
+    url = (data or {}).get("url", "").strip()
+    note = (data or {}).get("note", "").strip()
+    from job_sentinel.store import get_db as js_get_db, upsert_job, update_status
+    from job_sentinel.email_sync import match_company
+    from job_sentinel.models import Job
+    with js_get_db(str(DB_PATH)) as c:
+        pool = [r["company"] for r in c.execute("SELECT DISTINCT company FROM jobs")]
+        matched = match_company(company, pool)[0] if company else ""
+        if matched:
+            row = c.execute(
+                "SELECT raw_hash,url FROM jobs WHERE company=? ORDER BY match_score DESC LIMIT 1",
+                (matched,),
+            ).fetchone()
+            if row:
+                update_status(c, row["raw_hash"], "已投")
+                return {"ok": True, "company": matched, "matched": True,
+                        "status": "已投", "job_url": row["url"]}
+        job = Job(
+            company=company or "未知公司",
+            title=title or "网申投递",
+            city="", education="", batch="", deadline="",
+            url=url, link_type="源详情页", source="浏览器扩展",
+            nature="", industry="", major="", school_level="", salary="",
+            first_seen=datetime.now().strftime("%Y-%m-%d"),
+            match_score=0, match_reason=note or "浏览器扩展网申记录",
+            status="已投",
+        )
+        upsert_job(c, job)
+        return {"ok": True, "company": job.company, "matched": False,
+                "status": "已投", "job_url": url, "new": True}
+
+
+@app.post("/api/extension/deliveries")
+async def api_extension_deliveries(request: Request):
+    """浏览器扩展上报：从「我的投递」列表页批量抓取 (公司, 状态) 回写看板。"""
+    auth = request.headers.get("Authorization", "")
+    token = auth.replace("Bearer ", "", 1).strip()
+    if token != EXT_TOKEN:
+        return JSONResponse(status_code=401, content={"ok": False, "error": "unauthorized"})
+    data = await request.json()
+    rows = (data or {}).get("rows", []) or []
+    if not isinstance(rows, list):
+        rows = []
+    from job_sentinel.email_sync import parse_delivery_list
+    result = parse_delivery_list(rows, str(DB_PATH))
+    # 补全库外新建的真实投递公司：自动搜 JD/要求 + 复用 matcher 算匹配度
+    enriched = []
+    for item in result.get("created", [])[:8]:  # 一次最多补全前 8 家，避免列表页过大卡接口
+        try:
+            q = f"{item['company']} {item.get('title', '')} 招聘 岗位职责 任职要求".strip()
+            md = await web_search(q, 5)
+            from job_sentinel.enrich import enrich_job_from_search
+            enr = enrich_job_from_search(
+                item["raw_hash"], item["company"], item.get("title", ""), md, str(DB_PATH)
+            )
+            enriched.append(enr)
+        except Exception as e:
+            logger.warning(f"补全公司 {item.get('company')} 失败: {e}")
+    result["enriched"] = enriched
+    return result
+
+
+@app.get("/api/profile")
+async def api_profile_get():
+    from job_sentinel.profile import load_profile
+    from pathlib import Path
+    base = Path(__file__).parent
+    return load_profile(base / "job_sentinel" / "profile.json")
+
+
+@app.post("/api/profile", dependencies=[Depends(require_auth)])
+async def api_profile_post(request: Request):
+    data = await request.json()
+    from job_sentinel.profile import save_profile
+    from pathlib import Path
+    base = Path(__file__).parent
+    return save_profile(data or {}, base / "job_sentinel" / "profile.json")
+
+
+# ============================================================
 # Caspian 多渠道路由
 # ============================================================
 async def start_caspian():
@@ -1497,10 +2212,12 @@ async def start_caspian():
         import threading
 
         def _run_listen():
-            try:
-                client.listen()  # 同步阻塞死循环，在守护线程里跑，绝不阻塞主循环
-            except Exception as e:
-                logger.error(f"Caspian listen 异常: {e}")
+            while not getattr(server_state, "stop_flag", False):
+                try:
+                    client.listen()  # 同步阻塞死循环，在守护线程里跑，绝不阻塞主循环
+                except Exception as e:
+                    logger.error(f"Caspian listen 异常，5 秒后重连: {e}")
+                    time.sleep(5)
 
         threading.Thread(target=_run_listen, daemon=True, name="caspian-listen").start()
         print("🤖 Hermes 全渠道已就绪")

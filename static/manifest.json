@@ -1,0 +1,10 @@
+{
+  "name": "Hermes 岗位哨兵",
+  "short_name": "岗位哨兵",
+  "description": "Hermes Sentinel 秋招哨兵：按你的画像筛选、匹配、追踪校招岗位",
+  "start_url": "/jobs",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": []
+}

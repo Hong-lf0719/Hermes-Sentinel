@@ -17,6 +17,7 @@ Hermes Sentinel 是一个面向**求职 AI/Agent 岗位**的个人信息情报�
 | 💻 本机操控 | 执行命令（白名单安全限制）、读写文件 | 「桌面有什么文件」 |
 | 📡 按需推送 | 在邮件里喊一声，HTML 情报邮件推到手机 | 邮件发「发日报」 |
 | 📈 可视化后台 | 对话统计 / 知识库 / 工具调用 / 日报存档 | 浏览器开 `/dashboard` |
+| 🎯 秋招哨兵 | 按地区/方向/学历/院校/批次筛选匹配校招岗位，卡片流 + 投递状态追踪 | 「扫岗位」「查秋招」 / 浏览器开 `/jobs` |
 
 ## 🏗️ 架构
 
@@ -25,16 +26,45 @@ Email (Caspian) ──┐
                   ├──→ hermes_caspian (异步适配器) ──┐
 手机浏览器 ───────┤                                    ├──→ Agent Core ──→ DeepSeek API
   (FastAPI)       └──→ static/index.html, dashboard ──┘        │
-                                                              │   12 个工具 (web / 报告 / RAG / 操控)
+                                                              │   14 个工具 (web / 报告 / RAG / 操控)
 RAG 长期记忆 ───── hermes_rag (自动注入) ─────────────────────┘
                                                               └── reports 表 (日报存档)
 ```
 
 - **接入层**：`hermes_caspian`（可发布 pip 包，异步 Email 接入）+ FastAPI Web UI
 - **核心**：DeepSeek（`deepseek-v4-flash`，走代理网关）
-- **工具（12 个）**：`web_search` / `search_github` / `hackernews_top` / `arxiv_latest` / `ai_daily_report` / `ai_job_report` / `kb_add` / `kb_search` / `kb_stats` / `execute_command` / `read_file` / `write_file`
+- **工具（14 个）**：`web_search` / `search_github` / `hackernews_top` / `arxiv_latest` / `ai_daily_report` / `ai_job_report` / `job_sentinel_scan` / `job_sync_email` / `kb_add` / `kb_search` / `kb_stats` / `execute_command` / `read_file` / `write_file`
 - **记忆双轨**：SQLite 短期对话历史 + `hermes_rag` 长期可检索知识库
 - **渲染**：`report_html.py` 数据驱动，输出手机 QQ 邮箱兼容的 table 布局 + 内联 CSS
+- **秋招哨兵**：`job_sentinel/`，按用户画像筛选匹配校招岗位，卡片流前端 `static/jobs.html`（PWA）
+  - 采集 `sources/`：**武汉大学就业网（主源·岗位级富矿）** → ResumeMaker 雷达 → offer多多 → 目标公司池。武大源逆向就业网 API（`getToken`→`ajax_frontRecruitinfo`→`ajax_show`），按国标行政区划码（武汉 420100 / 湖北 420000…）精准过滤，返回**具体岗位名+城市+学历+专业+薪资+JD全文**，并抽取简章正文里的企业网申表单直链。适配器模式，任一源失效不影响主流程
+  - 匹配 `matcher.py`：三级过滤（行业黑名单 → **技术相关度** → 硬条件，含学历枚举「本科,硕士」解析与「其他」批次放行），打分权重 技术 50 / 方向 25 / 地区 12 / 央国企 8 / 学历 3 / **链接 官方网申5·简章详情4·官方校招页2·搜索直达1**
+  - 投递链接精准化：采集源直给的「官方网申」（企业自建表单 jsj.top/wjx/moka/campus…）与「简章详情」（武大就业网招聘简章页 `xsjy.whu.edu.cn/.../show`）为**受信直链**，优先于公司首页；`_pick_apply_url` 只认真正的网申域名，找不到就回退简章页，**绝不拿公司首页凑数**。非受信源才降级 官方校招页 → 搜索直达，保证每张卡片点过去就是投递页/简章，不用自己找
+  - 存储 `store.py`：SQLite + 投递状态追踪；清理历史噪声时**保护已投/笔试/面试记录**
+  - **投递进度自动同步** `email_sync.py`：把智联/BOSS/企业聘用等**邮件自动解析**成岗位状态变更并回写库，无需手动标记。两条接入路径：① **QQ 邮箱自动转发**——在 QQ 邮箱设收信规则，把含「投递/笔试/面试/offer/未通过」的邮件转发到 Hermes 的 Caspian 地址（`agt-...@agents.trycaspianai.com`），转发到达即识别→解析→回写→回推汇总到手机；② **手动粘贴**——把邮件正文发给 Hermes 说「解析这封邮件」同样生效。`parse_delivery_email` 按状态词前 40 字窗口取最靠近的公司（避免盘点邮件串公司），`挂` 只用明确否定词（「感谢关注」等客套结尾不算拒信），状态按漏斗只前进（挂可覆盖）。投递看板 `static/jobs.html` 顶部实时汇总各状态数量，点胶囊筛选
+
+### 📧 投递邮件自动同步（一键设置）
+
+让 Hermes 自动知道你投到哪了，不用手动标记：
+
+1. 打开 **QQ 邮箱 → 设置 → 收信规则**（或「自动转发」），新建规则：
+   - 条件：邮件主题/正文包含 `投递` 或 `笔试` 或 `面试` 或 `offer` 或 `未通过`
+   - 动作：**自动转发** 到 Hermes 的 Caspian 地址 `agt-44bab13d0748dae0a89da5c8-9323f0@agents.trycaspianai.com`
+2. 此后每收到一封投递确认/笔试/面试/offer/拒信，Hermes 自动解析公司名+状态，回写到「岗位哨兵」对应岗位，并把更新汇总**回推到手机**。
+3. 不想设转发？直接把邮件正文粘贴给 Hermes，说「解析这封邮件」即可。
+
+> 解析规则：识别「投递成功/简历已查收→已投」「笔试/测评→笔试」「面试邀请→面试」「录用/offer→OC」「未通过/落选→挂」；状态按漏斗只前进（挂可覆盖）；同一公司多封邮件折叠为最终状态。库里没有的公司会提示先「扫岗位」补充来源。
+
+### 🧩 浏览器扩展自动捕获网申（不发邮件也能记）
+
+针对「网申只显示提交成功页、不发确认邮件」的场景，用浏览器扩展在提交成功页直接上报：
+
+1. **安装**：Chrome/Edge 打开 `chrome://extensions` → 右上角「开发者模式」→「加载已解压的扩展程序」→ 选择 `job_sentinel/extension/` 目录。
+2. **一键捕获**（主路径）：网申提交成功后点扩展图标 → popup 自动提取当前页公司名+岗位 → 确认点「记录本次投递」即写入（状态=已投）。
+3. **半自动通知**：扩展后台监听 URL 含 `success/submit/apply/完成/提交成功` 且来自招聘域的页面，自动弹通知；**点一下通知**即提取+上报，比开 popup 省一步（不会无确认自动写库，避免误报）。
+4. **连接**：扩展默认连 `http://127.0.0.1:9866`、Token `hermes-ext-2026`（与服务端 `EXT_TOKEN` 一致，可在 popup「设置」或 `.env` 改）。
+
+服务端新增 `POST /api/extension/apply`（Bearer 鉴权）：收到 `{company,title,url}` 后用 `match_company` 归位到库内岗位并置「已投」，库内无匹配则新建 `source=浏览器扩展` 记录；`server.py` 已加 CORS 允许 `chrome-extension://` 跨域。
 
 ## 🚀 快速开始
 

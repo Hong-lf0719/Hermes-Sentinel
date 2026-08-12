@@ -41,12 +41,18 @@ def render_report_html(data: dict, direction: str = "数据科学") -> tuple:
     """
     date = _e(data.get("date", ""))
     title = _e(data.get("title", "AI 日报"))
+    report_type = data.get("report_type", "daily")
     intro = _e(data.get("intro", ""))
     top3 = data.get("top3", []) or []
     projects = data.get("projects", []) or []
     industry = data.get("industry", []) or []
     learning = data.get("learning", []) or []
     one_liner = _e(data.get("one_liner", ""))
+
+    # 新增字段
+    industry_news = data.get("industry_news") or []
+    learning_ops = data.get("learning_opportunities") or []
+    app_strategy = data.get("application_strategy") or {}
 
     # ---------- TOP3 卡片 ----------
     top3_html = ""
@@ -94,12 +100,29 @@ def render_report_html(data: dict, direction: str = "数据科学") -> tuple:
                 </tr>"""
         shade = not shade
 
-    # ---------- 行业信号 ----------
+    # ---------- 行业信号（仅求职专题版渲染，日报与 industry_news 重复故跳过） ----------
     industry_html = "".join(
         f'<br>· {_e(x)}' for x in industry
     )
     if industry_html:
         industry_html = industry_html[4:]  # 去掉首个 <br>
+    if report_type == "job":
+        industry_block_html = f"""
+          <!-- 📰 行业信号 -->
+          <tr>
+            <td style="padding:14px 30px 4px;">
+              <div style="font-size:15px; font-weight:800; color:#0f172a; border-left:4px solid #64748b; padding-left:10px;">📰 行业信号</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 30px 2px;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc; border-radius:8px;">
+                <tr><td style="padding:14px 16px; font-size:13px; color:#475569; line-height:1.8;">{industry_html or "· 暂无"}</td></tr>
+              </table>
+            </td>
+          </tr>"""
+    else:
+        industry_block_html = ""
 
     # ---------- 学习建议 ----------
     learning_html = "".join(
@@ -221,6 +244,106 @@ def render_report_html(data: dict, direction: str = "数据科学") -> tuple:
     else:
         tips_html = '· "精通多 Agent 系统架构与上下文工程"<br>· "深入理解知识图谱增强的 Agent 记忆机制"<br>· "具备 Agent + 垂直领域落地经验"'
 
+    # ---------- 📰 行业新闻 & 趋势（深度分析） ----------
+    news_html = ""
+    if industry_news:
+        for item in industry_news[:3]:
+            num = item.get("num", "")
+            ntitle = _e(item.get("title", ""))
+            analysis = _e(item.get("analysis", ""))
+            news_html += f"""
+          <tr>
+            <td style="padding:12px 30px 2px;">
+              <div style="font-size:14px; font-weight:800; color:#0f172a;">
+                {num}. {ntitle}
+              </div>
+              <div style="margin-top:4px; font-size:13px; color:#475569; line-height:1.8;">{analysis}</div>
+            </td>
+          </tr>"""
+        news_html = f"""
+          <!-- 📰 行业新闻 & 趋势 -->
+          <tr>
+            <td style="padding:18px 30px 6px;">
+              <div style="font-size:16px; font-weight:800; color:#0f172a; border-left:4px solid #6366f1; padding-left:10px;">📰 行业新闻 & 趋势</div>
+            </td>
+          </tr>
+          {news_html}
+          <tr><td style="padding:6px 30px;"><div style="border-top:1px solid #eef1f5;"></div></td></tr>"""
+
+    # ---------- 🎓 学习 / 投递机会（优先级表格） ----------
+    learn_html = ""
+    if learning_ops:
+        priority_colors = {"高": "#ef4444", "中": "#f59e0b", "长朗": "#10b981"}
+        learn_rows = ""
+        shade = False
+        for item in learning_ops:
+            pri = _e(item.get("priority", "中"))
+            pcolor = priority_colors.get(pri, "#94a3b8")
+            bg = ' style="background:#fafcff;"' if shade else ""
+            learn_rows += f"""
+                <tr{bg}>
+                  <td style="padding:9px 8px; border-bottom:1px solid #f1f5f9;">
+                    <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{pcolor};margin-right:6px;"></span>
+                    <span style="font-weight:700; color:#0f172a;">{_e(item.get('topic',''))}</span>
+                  </td>
+                  <td style="padding:9px 8px; border-bottom:1px solid #f1f5f9; color:#2563eb; font-size:12px;">{_e(item.get('stack',''))}</td>
+                  <td style="padding:9px 8px; border-bottom:1px solid #f1f5f9; color:#475569; font-size:12px;">{_e(item.get('rationale',''))}</td>
+                </tr>"""
+            shade = not shade
+        learn_html = f"""
+          <!-- 🎓 学习 / 投递机会 -->
+          <tr>
+            <td style="padding:18px 30px 6px;">
+              <div style="font-size:16px; font-weight:800; color:#0f172a; border-left:4px solid #8b5cf6; padding-left:10px;">🎓 学习 / 投递机会</div>
+              <div style="margin-top:4px; font-size:11px; color:#94a3b8;">按优先级排序 · 技能方向建议</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:10px 30px;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; font-size:12px;">
+                <tr style="color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:.5px;">
+                  <td style="padding:6px 8px; border-bottom:2px solid #eef1f5; text-align:left;">技能方向</td>
+                  <td style="padding:6px 8px; border-bottom:2px solid #eef1f5; text-align:left; width:180px;">技术栈</td>
+                  <td style="padding:6px 8px; border-bottom:2px solid #eef1f5; text-align:left;">推荐理由</td>
+                </tr>
+                {learn_rows}
+              </table>
+            </td>
+          </tr>
+          <tr><td style="padding:6px 30px;"><div style="border-top:1px solid #eef1f5;"></div></td></tr>"""
+
+    # ---------- 🎯 投递策略 ----------
+    strat_html = ""
+    if app_strategy and isinstance(app_strategy, dict):
+        def _strat_list(items, icon):
+            items = items or []
+            return "".join(f'<li style="margin-bottom:6px;">{icon} {_e(x)}</li>' for x in items)
+        companies_html = _strat_list(app_strategy.get("companies"), "🏢")
+        industries_html = _strat_list(app_strategy.get("industries"), "📊")
+        oss_html = _strat_list(app_strategy.get("open_source"), "💻")
+        strat_html = f"""
+          <!-- 🎯 投递策略 -->
+          <tr>
+            <td style="padding:18px 30px 6px;">
+              <div style="font-size:16px; font-weight:800; color:#0f172a; border-left:4px solid #f59e0b; padding-left:10px;">🎯 投递策略</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:10px 30px;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#fffbeb; border-radius:8px;">
+                <tr><td style="padding:14px 20px; font-size:13px; color:#713f12; line-height:1.9;">
+                  <b style="color:#92400e;font-size:14px;">大厂/公司：</b>
+                  <ul style="margin:6px 0 12px 18px;padding:0;">{companies_html or '<li>暂无</li>'}</ul>
+                  <b style="color:#92400e;font-size:14px;">行业赛道：</b>
+                  <ul style="margin:6px 0 12px 18px;padding:0;">{industries_html or '<li>暂无</li>'}</ul>
+                  <b style="color:#92400e;font-size:14px;">开源贡献：</b>
+                  <ul style="margin:6px 0 0 18px;padding:0;">{oss_html or '<li>暂无</li>'}</ul>
+                </td></tr>
+              </table>
+            </td>
+          </tr>
+          <tr><td style="padding:6px 30px;"><div style="border-top:1px solid #eef1f5;"></div></td></tr>"""
+
     # ---------- 大厂动态（求职专题版可选） ----------
     bigtech = data.get("bigtech")
     bigtech_html = ""
@@ -319,22 +442,14 @@ def render_report_html(data: dict, direction: str = "数据科学") -> tuple:
 
           {bigtech_html}
 
+          {news_html}
+          {learn_html}
+          {strat_html}
+
           <!-- 分隔 -->
           <tr><td style="padding:6px 30px;"><div style="border-top:1px solid #eef1f5;"></div></td></tr>
 
-          <!-- 📰 行业信号 -->
-          <tr>
-            <td style="padding:14px 30px 4px;">
-              <div style="font-size:15px; font-weight:800; color:#0f172a; border-left:4px solid #64748b; padding-left:10px;">📰 行业信号</div>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:8px 30px 2px;">
-              <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc; border-radius:8px;">
-                <tr><td style="padding:14px 16px; font-size:13px; color:#475569; line-height:1.8;">{industry_html or "· 暂无"}</td></tr>
-              </table>
-            </td>
-          </tr>
+          {industry_block_html}
 
           <!-- 分隔 -->
           <tr><td style="padding:6px 30px;"><div style="border-top:1px solid #eef1f5;"></div></td></tr>
@@ -411,6 +526,26 @@ def render_report_html(data: dict, direction: str = "数据科学") -> tuple:
         text_lines.append("📰 行业信号")
         for x in industry:
             text_lines.append(f"- {x}")
+        text_lines.append("")
+    if industry_news:
+        text_lines.append("📰 行业新闻 & 趋势（深度分析）")
+        for item in industry_news:
+            text_lines.append(f"{item.get('num','')}. {item.get('title','')}")
+            text_lines.append(f"   {item.get('analysis','')}")
+            text_lines.append("")
+    if learning_ops:
+        text_lines.append("🎓 学习 / 投递机会")
+        for item in learning_ops:
+            text_lines.append(f"- [{item.get('priority','中')}] {item.get('topic','')} | {item.get('stack','')} | {item.get('rationale','')}")
+        text_lines.append("")
+    if app_strategy and isinstance(app_strategy, dict):
+        text_lines.append("🎯 投递策略")
+        for x in (app_strategy.get("companies") or []):
+            text_lines.append(f"- [公司] {x}")
+        for x in (app_strategy.get("industries") or []):
+            text_lines.append(f"- [行业] {x}")
+        for x in (app_strategy.get("open_source") or []):
+            text_lines.append(f"- [开源] {x}")
         text_lines.append("")
     bigtech = data.get("bigtech")
     if isinstance(bigtech, dict):

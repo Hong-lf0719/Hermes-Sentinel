@@ -30,7 +30,7 @@ def retrieve_context(
     query: str,
     top_k: int = 3,
     path: Optional[str] = None,
-    min_score: float = 0.0,
+    min_score: float = 0.1,
     max_chars: int = 1200,
 ) -> str:
     """检索与 query 相关的知识片段，格式化为可注入的上下文文本。

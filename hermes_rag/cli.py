@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 import httpx
+import certifi
 
 from .rag import get_store, retrieve_context
 from .store import KnowledgeStore
@@ -39,7 +40,7 @@ def _strip_html(html: str) -> str:
 
 async def _fetch_url(url: str) -> str:
     async with httpx.AsyncClient(
-        timeout=20, verify=False, headers={"User-Agent": "Mozilla/5.0"}
+        timeout=20, verify=certifi.where(), headers={"User-Agent": "Mozilla/5.0"}
     ) as c:
         r = await c.get(url)
         r.raise_for_status()

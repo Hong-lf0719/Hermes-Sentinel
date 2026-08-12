@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Hermes 网申捕获",
+  "version": "1.0.0",
+  "description": "网申提交成功页一键/自动记录投递到 Hermes Sentinel 岗位哨兵",
+  "permissions": ["activeTab", "tabs", "storage", "notifications"],
+  "host_permissions": ["http://127.0.0.1:9866/*", "http://localhost:9866/*"],
+  "action": { "default_popup": "popup.html", "default_title": "Hermes 网申捕获" },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_idle" }
+  ]
+}

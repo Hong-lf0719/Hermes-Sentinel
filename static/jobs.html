@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>岗位哨兵 · Hermes Sentinel</title>
+<link rel="manifest" href="/static/manifest.json" />
+<style>
+  :root{
+    --bg:#0f172a; --card:#1e293b; --card2:#273449; --line:#334155;
+    --txt:#e2e8f0; --sub:#94a3b8; --acc:#38bdf8; --good:#22c55e; --warn:#f59e0b; --bad:#ef4444;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}
+  header{padding:14px 16px;position:sticky;top:0;background:rgba(15,23,42,.92);backdrop-filter:blur(8px);z-index:10;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:17px}
+  .sub{color:var(--sub);font-size:12px;margin-top:2px}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--line)}
+  .bar select,.bar input{padding:7px 9px;background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:8px;font-size:13px}
+  .bar input[type=text]{min-width:90px}
+  button{cursor:pointer;border:none;border-radius:8px;padding:8px 12px;font-size:13px;font-weight:600}
+  .btn-scan{background:var(--acc);color:#04293a}
+  .btn-set{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+  .btn-set.on{background:var(--acc);color:#04293a;border-color:var(--acc)}
+  .btn-refresh{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+  .list{padding:12px 16px;display:grid;gap:12px}
+  /* 投递进度看板：自动汇总 + 一键筛选 */
+  .dash{background:rgba(15,23,42,.94);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:10px 16px}
+  .dash .dh{font-size:11px;color:var(--sub);margin-bottom:7px;display:flex;justify-content:space-between;align-items:center}
+  .dash .dh b{color:var(--acc);font-size:13px}
+  .caps{display:flex;gap:7px;flex-wrap:wrap}
+  .cap{display:flex;align-items:baseline;gap:5px;padding:6px 10px;border-radius:10px;background:var(--card);border:1px solid var(--line);cursor:pointer;font-size:12px;color:var(--sub);transition:.15s}
+  .cap:hover{border-color:var(--acc)}
+  .cap .n{font-size:16px;font-weight:800;color:var(--txt)}
+  .cap.active{border-color:var(--acc);background:#0c2c3e}
+  .cap.active .n{color:var(--acc)}
+  /* 漏斗色：新/已看=灰 已投=蓝 笔试=紫 面试=橙 OC=绿 挂=红 */
+  .cap.c-new .n,.cap.c-已看 .n{color:#94a3b8}
+  .cap.c-已投 .n{color:#38bdf8}
+  .cap.c-笔试 .n{color:#a78bfa}
+  .cap.c-面试 .n{color:#f59e0b}
+  .cap.c-OC .n{color:#22c55e}
+  .cap.c-挂 .n{color:#ef4444}
+  .cap.zero{opacity:.4}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:13px;position:relative}
+  .ctop{display:flex;align-items:flex-start;gap:10px}
+  .score{flex:0 0 auto;width:42px;height:42px;border-radius:10px;background:var(--card2);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;color:var(--acc)}
+  .cmain{flex:1;min-width:0}
+  .company{font-weight:700;font-size:15px}
+  .title{color:var(--sub);font-size:13px;margin-top:1px}
+  .batch{flex:0 0 auto;font-size:11px;padding:3px 8px;border-radius:20px;background:#0c4a6e;color:#7dd3fc;white-space:nowrap}
+  .meta{display:flex;flex-wrap:wrap;gap:6px;margin:9px 0 0;color:var(--sub);font-size:12px}
+  .meta span{background:var(--card2);padding:3px 7px;border-radius:6px}
+  .reason{margin-top:9px;font-size:12px;color:#cbd5e1;background:#0b2540;padding:7px 9px;border-radius:8px;border-left:3px solid var(--acc)}
+  .jd{margin-top:9px}
+  .jd-btn{background:var(--card2);color:var(--sub);border:1px solid var(--line);padding:5px 9px;border-radius:8px;font-size:12px;font-weight:500}
+  .jd-btn:hover{border-color:var(--acc);color:var(--txt)}
+  .jd-body{margin-top:7px;font-size:12px;color:#cbd5e1;line-height:1.65;background:#0b2540;padding:9px;border-radius:8px;border-left:3px solid var(--good);white-space:pre-wrap;word-break:break-word}
+  .actions{display:flex;align-items:center;gap:8px;margin-top:11px;flex-wrap:wrap}
+  .sg{display:flex;gap:4px;flex-wrap:wrap}
+  .sg button{padding:5px 9px;font-size:12px;background:var(--card2);color:var(--sub);border:1px solid var(--line);font-weight:500}
+  .sg button.on{background:var(--acc);color:#04293a;border-color:var(--acc);font-weight:700}
+  .apply{margin-left:auto;text-decoration:none;background:var(--good);color:#052e16;padding:7px 12px;border-radius:8px;font-weight:700;font-size:13px}
+  .apply.nolink{background:var(--card2);color:var(--sub)}
+  /* 链接质量：绿=官方校招页，蓝=源详情页，灰蓝=搜索兜底 */
+  .apply.lk-official{background:#22c55e;color:#052e16}
+  .apply.lk-detail{background:#38bdf8;color:#052030}
+  .apply.lk-search{background:#475569;color:#e2e8f0}
+  /* 匹配分档：高分醒目 */
+  .score.s-hi{background:#14532d;color:#4ade80}
+  .score.s-mid{background:#3f3f0a;color:#fde047}
+  .score.s-low{background:var(--card2);color:var(--sub)}
+  .empty{text-align:center;color:var(--sub);padding:40px 20px;line-height:1.7}
+  /* 设置弹窗 */
+  .mask{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
+  .mask.on{display:flex}
+  .modal{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;width:100%;max-width:420px;max-height:86vh;overflow:auto}
+  .modal h3{margin:0 0 12px}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:12px;color:var(--sub);margin-bottom:5px}
+  .field input,.field textarea{width:100%;padding:9px;background:var(--card2);border:1px solid var(--line);border-radius:8px;color:var(--txt);font-size:13px}
+  .field .hint{font-size:11px;color:var(--sub);margin-top:3px}
+  .chk{display:flex;flex-wrap:wrap;gap:6px}
+  .chk label{display:flex;align-items:center;gap:4px;background:var(--card2);padding:6px 9px;border-radius:8px;font-size:12px;border:1px solid var(--line)}
+  .modal .foot{display:flex;gap:10px;margin-top:6px}
+  .modal .foot button{flex:1}
+  .btn-save{background:var(--acc);color:#04293a}
+  .btn-cancel{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#04293a;color:#7dd3fc;padding:9px 16px;border-radius:20px;font-size:13px;opacity:0;transition:.3s;z-index:30;border:1px solid var(--acc)}
+  .toast.on{opacity:1}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎯 岗位哨兵</h1>
+  <div class="sub">按你的画像筛选 · 匹配 · 追踪校招岗位 · <a href="/" style="color:var(--acc)">返回对话</a></div>
+</header>
+
+<div class="bar">
+  <select id="f-batch"><option value="">全部批次</option><option>提前批</option><option>秋招</option><option>春招</option><option>补录</option><option>实习</option><option>其他</option></select>
+  <select id="f-status"><option value="">全部状态</option><option>新</option><option>已看</option><option>已投</option><option>笔试</option><option>面试</option><option>挂</option><option>OC</option></select>
+  <input id="f-city" type="text" placeholder="城市筛选" />
+  <input id="f-score" type="number" placeholder="最低分" style="width:78px" />
+  <button class="btn-refresh" onclick="loadJobs()">刷新</button>
+  <button class="btn-scan" onclick="scan()">扫岗位</button>
+  <button class="btn-set" id="f-real" onclick="toggleReal()">✓ 只看真实投递</button>
+  <button class="btn-set" onclick="openSet()">⚙ 画像</button>
+</div>
+
+<div class="dash">
+  <div class="dh"><span>📊 投递进度（自动汇总，点胶囊筛选）</span><b id="dash-sum"></b></div>
+  <div class="caps" id="caps"></div>
+</div>
+
+<div class="list" id="list"></div>
+
+<!-- 设置弹窗 -->
+<div class="mask" id="mask">
+  <div class="modal">
+    <h3>⚙ 我的求职画像</h3>
+    <div class="field">
+      <label>目标地区（逗号分隔）</label>
+      <input id="p-regions" placeholder="武汉, 孝感, 湖北, 远程" />
+      <div class="hint">命中其一即收录</div>
+    </div>
+    <div class="field">
+      <label>方向关键词（逗号分隔）</label>
+      <input id="p-directions" placeholder="AI应用开发, 数据开发, 大模型应用" />
+    </div>
+    <div class="field">
+      <label>学历</label>
+      <input id="p-education" placeholder="本科" />
+    </div>
+    <div class="field">
+      <label>院校要求</label>
+      <input id="p-school" placeholder="双非可投" />
+    </div>
+    <div class="field">
+      <label>关注批次（逗号分隔）</label>
+      <input id="p-batches" placeholder="提前批, 秋招, 春招, 补录, 实习" />
+    </div>
+    <div class="field">
+      <label>薪资下限（0=不限）</label>
+      <input id="p-salary" type="number" placeholder="0" />
+    </div>
+    <div class="field">
+      <label>排除关键词（逗号分隔）</label>
+      <input id="p-exclude" placeholder="销售, 土木" />
+    </div>
+    <div class="foot">
+      <button class="btn-cancel" onclick="closeSet()">取消</button>
+      <button class="btn-save" onclick="saveSet()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const STATUSES = ["新","已看","已投","笔试","面试","挂","OC"];
+let onlyReal = false;  // 只看真实投递（状态已推进 或 浏览器扩展主动投的）
+function toast(m){const t=document.getElementById("toast");t.textContent=m;t.classList.add("on");setTimeout(()=>t.classList.remove("on"),1800);}
+function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+async function loadJobs(){
+  const b=document.getElementById("f-batch").value;
+  const s=document.getElementById("f-status").value;
+  const c=document.getElementById("f-city").value.trim();
+  const sc=document.getElementById("f-score").value.trim();
+  const q=new URLSearchParams();
+  if(b)q.set("batch",b); if(s)q.set("status",s); if(c)q.set("city",c); if(sc)q.set("min_score",sc);
+  const r=await fetch("/api/jobs?"+q.toString());
+  const d=await r.json();
+  if(onlyReal) d.jobs=d.jobs.filter(j=>j.status!=='新'||(j.source||'').indexOf('浏览器扩展')>=0);
+  const list=document.getElementById("list");
+  if(!d.jobs.length){list.innerHTML='<div class="empty">暂无匹配岗位。<br>点「扫岗位」触发哨兵扫描，或在「⚙ 画像」调整条件。</div>';loadStats();return;}
+  list.innerHTML=d.jobs.map(cardHTML).join("");
+  loadStats();
+}
+// 链接质量 → 按钮文案/样式。让用户一眼知道点下去会到哪
+const LINK_UI={
+  "官方校招页":{txt:"去官网投递 ↗",cls:"lk-official"},
+  "源详情页"  :{txt:"查看详情 ↗",  cls:"lk-detail"},
+  "搜索直达"  :{txt:"搜索入口 ↗",  cls:"lk-search"},
+};
+function cardHTML(j){
+  const score=j.match_score||0;
+  const scls=score>=80?"s-hi":(score>=50?"s-mid":"s-low");
+  const lu=LINK_UI[j.link_type]||{txt:"打开 ↗",cls:""};
+  const link=j.url
+    ? `<a class="apply ${lu.cls}" href="${esc(j.url)}" target="_blank" rel="noopener">${lu.txt}</a>`
+    : `<span class="apply nolink">无链接</span>`;
+  const sg=STATUSES.map(st=>`<button class="${st===j.status?'on':''}" onclick="setStatus('${j.raw_hash}','${st}',this)">${st}</button>`).join("");
+  const meta=[
+    j.city&&`📍 ${esc(j.city)}`,
+    j.education&&`🎓 ${esc(j.education)}`,
+    j.deadline&&`⏰ ${esc(j.deadline)}`,
+    j.nature&&`🏢 ${esc(j.nature)}`,
+    j.industry&&`🔧 ${esc(j.industry)}`,
+    j.source&&`📡 ${esc(j.source)}`,
+  ].filter(Boolean).map(x=>`<span>${x}</span>`).join("");
+  return `<div class="card" data-hash="${j.raw_hash}">
+    <div class="ctop">
+      <div class="score ${scls}">${score}</div>
+      <div class="cmain"><div class="company">${esc(j.company)}</div><div class="title">${esc(j.title)}</div></div>
+      <div class="batch">${esc(j.batch||"其他")}</div>
+    </div>
+    <div class="meta">${meta}</div>
+    ${j.match_reason?`<div class="reason">💡 ${esc(j.match_reason)}</div>`:""}
+    ${j.jd_text?`<div class="jd"><button class="jd-btn" onclick="toggleJD(this)">📋 查看岗位 JD（自动补全）</button><div class="jd-body" style="display:none">${esc(j.jd_text)}</div></div>`:""}
+    <div class="actions"><div class="sg">${sg}</div>${link}</div>
+  </div>`;
+}
+async function setStatus(hash,status,btn){
+  await fetch("/api/jobs/"+hash+"/status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({status})});
+  const grp=btn.parentElement; grp.querySelectorAll("button").forEach(b=>b.classList.remove("on"));
+  btn.classList.add("on");
+  toast("标记为："+status);
+  loadStats();
+}
+function toggleJD(btn){
+  const b=btn.nextElementSibling;
+  const open=b.style.display!=='none';
+  b.style.display=open?'none':'block';
+  btn.textContent=open?'📋 查看岗位 JD（自动补全）':'📋 收起 JD';
+}
+let AUTH_TOKEN='__WEB_TOKEN__';
+async function scan(){
+  toast("哨兵扫描中…");
+  try{
+    await fetch("/chat",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+AUTH_TOKEN},body:JSON.stringify({message:"扫岗位",session_id:"sentinel"})});
+  }catch(e){}
+  await loadJobs();
+  toast("扫描完成，已刷新");
+}
+
+/* 画像设置 */
+async function openSet(){
+  try{
+    const r=await fetch("/api/profile"); const p=await r.json();
+    document.getElementById("p-regions").value=(p.regions||[]).join(", ");
+    document.getElementById("p-directions").value=(p.directions||[]).join(", ");
+    document.getElementById("p-education").value=p.education||"";
+    document.getElementById("p-school").value=p.school_level||"";
+    document.getElementById("p-batches").value=(p.batches||[]).join(", ");
+    document.getElementById("p-salary").value=p.salary_min||0;
+    document.getElementById("p-exclude").value=(p.exclude_keywords||[]).join(", ");
+  }catch(e){}
+  document.getElementById("mask").classList.add("on");
+}
+function closeSet(){document.getElementById("mask").classList.remove("on");}
+function splitCSV(s){return (s||"").split(/[,，]/).map(x=>x.trim()).filter(Boolean);}
+async function saveSet(){
+  const p={
+    regions:splitCSV(document.getElementById("p-regions").value),
+    directions:splitCSV(document.getElementById("p-directions").value),
+    education:document.getElementById("p-education").value.trim(),
+    school_level:document.getElementById("p-school").value.trim(),
+    batches:splitCSV(document.getElementById("p-batches").value),
+    salary_min:Number(document.getElementById("p-salary").value||0),
+    exclude_keywords:splitCSV(document.getElementById("p-exclude").value),
+  };
+  await fetch("/api/profile",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(p)});
+  closeSet(); toast("画像已保存");
+  await loadJobs();
+}
+
+/* 投递进度看板：从数据库自动汇总各状态数量（每次标记/刷新都重算），点胶囊即按状态筛选 */
+async function loadStats(){
+  try{
+    const r=await fetch("/api/jobs?min_score=0");
+    const d=await r.json();
+    const cnt={};
+    d.jobs.forEach(j=>{const s=j.status||"新"; cnt[s]=(cnt[s]||0)+1;});
+    const order=["新","已看","已投","笔试","面试","OC","挂"];
+    document.getElementById("caps").innerHTML=order.map(st=>
+      `<div class="cap c-${st} ${cnt[st]?'':'zero'}" onclick="filterStatus('${st}')"><span class="n">${cnt[st]||0}</span>${st}</div>`
+    ).join("");
+    const active=document.getElementById("f-status").value;
+    if(active){
+      document.querySelectorAll("#caps .cap").forEach(c=>{ if(c.textContent.indexOf(active)>=0) c.classList.add("on"); });
+    }
+    const ongoing=(cnt["笔试"]||0)+(cnt["面试"]||0)+(cnt["OC"]||0);
+    document.getElementById("dash-sum").textContent=
+      `共 ${d.count} 岗 · 已投 ${cnt["已投"]||0} · 进行中 ${ongoing} · 挂 ${cnt["挂"]||0}`;
+  }catch(e){}
+}
+function filterStatus(st){
+  const sel=document.getElementById("f-status");
+  sel.value=(sel.value===st)?"":st;   // 再点一次取消该筛选
+  loadJobs();
+}
+function toggleReal(){
+  onlyReal=!onlyReal;
+  document.getElementById("f-real").classList.toggle("on",onlyReal);
+  loadJobs();
+}
+loadJobs();
+</script>
+</body>
+</html>
