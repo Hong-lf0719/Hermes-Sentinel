@@ -7,6 +7,7 @@
 - 解释器：使用启动本看门狗的解释器（sys.executable），无需硬编码路径。
 """
 
+import os
 import sys
 import time
 import pathlib
@@ -17,6 +18,10 @@ PY = sys.executable                           # 启动看门狗的解释器（py
 SRV = str(HERE / "server.py")
 LOG = str(HERE / "hermes.log")
 STOP = HERE / "hermes.stop"
+
+# 强制子进程 UTF-8 模式：Caspian SDK 在 Windows 默认 GBK 下读配置会
+# 'gbk' codec can't decode 报错导致邮件通道静默掉线（2026-08-21 踩坑）
+ENV = {**os.environ, "PYTHONUTF8": "1"}
 
 
 def log(msg: str) -> None:
@@ -58,7 +63,7 @@ def main() -> None:
         try:
             # 用 with 管理日志文件句柄，避免每轮重开不关导致 fd 泄漏
             with open(LOG, "a", encoding="utf-8") as logfile:
-                p = subprocess.Popen([PY, SRV], stdout=logfile, stderr=subprocess.STDOUT)
+                p = subprocess.Popen([PY, SRV], stdout=logfile, stderr=subprocess.STDOUT, env=ENV)
         except Exception as e:
             log(f"启动失败: {e}")
             time.sleep(5)

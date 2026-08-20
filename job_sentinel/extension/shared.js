@@ -35,7 +35,34 @@ var _DOMAIN_COMPANY = {
   // 招聘平台（不反推，标记为平台）
   "zhaopin": null, "51job": null, "liepin": null, "bosszhipin": null, "boss": null,
   "lagou": null, "kanzhun": null, "maimai": null,
+  "nowcoder": null, "haitou": null, "yingjiesheng": null, "iguopin": null,
 };
+
+// ── 门户/平台类噪音后缀（"联影网申门户" 应归一为 "联影"）──
+var _PORTAL_SUFFIX = [
+  "网申门户", "网申系统", "网申平台", "招聘门户", "投递门户", "门户系统", "门户",
+  "校招官网", "校招网", "招聘官网", "招聘网", "投递系统", "个人中心", "申请中心",
+  "我的投递", "投递记录", "申请记录", "网申记录", "招聘首页", "校园招聘"
+];
+
+// 把抓取到的公司名归一：去【】季节前缀、去门户/平台后缀、去前导噪音。
+// 抓取与匹配两端共用同一口径，才能保证"同步"。
+function normalizeCompany(s) {
+  if (!s) return "";
+  s = String(s).trim();
+  s = s.replace(/^【[^】]{0,20}】/, "");                 // 【2026校招】
+  s = s.replace(/^(?:秋招|春招|校招|社招|实习)[-_－\s]*/, "");
+  for (var i = 0; i < _PORTAL_SUFFIX.length; i++) {
+    var suf = _PORTAL_SUFFIX[i];
+    if (s.length > suf.length && s.slice(s.length - suf.length) === suf) {
+      s = s.slice(0, s.length - suf.length);
+      break;
+    }
+  }
+  s = s.replace(/^(?:我的|个人)[-_－\s]*/, "");
+  s = s.replace(/^[·\-_\s]+|[·\-_\s]+$/g, "").trim();
+  return s;
+}
 
 function guessCompany(input, url) {
   if (!input) return "";
@@ -43,73 +70,105 @@ function guessCompany(input, url) {
   // ① 现有正则：后缀词匹配
   var m = input.match(/([一-龥A-Za-z·&]{2,20}?)(?:公司|集团|科技|网络技术|软件|信息技术|股份|有限|大学)/);
   if (m) {
-    var c = m[1].replace(/[·\s]+$/, "");
-    if (!_NON_COMPANY.test(c)) return c;
+    var c = normalizeCompany(m[1].replace(/[·\s]+$/, ""));
+    if (c && !_NON_COMPANY.test(c)) return c;
   }
 
   // ② 冒号前缀模式（"腾讯 - 招聘" → 腾讯）
   m = input.match(/^([一-龥A-Za-z·&]{2,16})[_\-－\s:：]/);
-  if (m && !_NON_COMPANY.test(m[1])) return m[1];
+  if (m) {
+    var c2 = normalizeCompany(m[1]);
+    if (c2 && !_NON_COMPANY.test(c2)) return c2;
+  }
 
   // ③ URL 域名反推（最后兜底）
   if (url) {
     try {
       var host = new URL(url).hostname.toLowerCase();
-      // 先精确匹配
       for (var d in _DOMAIN_COMPANY) {
         if (_DOMAIN_COMPANY[d] !== null && host.indexOf(d) !== -1)
           return _DOMAIN_COMPANY[d];
       }
-    } catch(e) {}
+    } catch (e) {}
   }
 
   // ④ 截断兜底（但过滤掉明显非公司的）
-  var fallback = input.slice(0, 16).trim();
+  var fallback = normalizeCompany(input.slice(0, 16).trim());
   return _NON_COMPANY.test(fallback) ? "" : fallback;
 }
 
-function guessTitle(text) {
-  if (!text) return "";
-  text = text.replace(/\s+/g, " ");
-
-  // ① 明确的岗位标签
-  var m = text.match(/(?:应聘|申请|投递|报名|报考|职位|岗位)[为：:\s]*([一-龥A-Za-z·]{2,30}?)(?:\s|$|。|，|；|\(|（)/);
-  if (m) return cleanTitle(m[1]);
-
-  // ② 常见岗位后缀（从文本中找最长匹配）
-  var suffixes = [
-    "开发工程师", "软件开发工程师", "大数据平台开发工程师", "前端开发工程师", "后端开发工程师",
-    "全栈工程师", "算法工程师", "机器学习工程师", "深度学习工程师", "NLP工程师",
-    "数据分析师", "数据科学家", "数据开发工程师", "数据仓库工程师", "BI工程师",
-    "产品经理", "产品运营", "用户运营", "内容运营", "增长运营",
-    "测试工程师", "自动化测试", "测试开发", "QA工程师",
-    "运维工程师", "DevOps工程师", "SRE工程师", "DBA",
-    "嵌入式工程师", "硬件工程师", "芯片设计", "IC设计",
-    "管培生", "管理培训生", "储备干部",
-    "解决方案架构师", "技术支持工程师", "售前工程师",
-    "数字化与数据开发工程师", "数字化专员", "数字化转型顾问",
-    "Java开发", "Python开发", "Go开发", "C++开发", "前端开发", "后端开发",
-    "Android开发", "iOS开发", "移动端开发",
-    "视觉设计师", "UI设计师", "UX设计师", "交互设计师",
-    "人力资源专员", "HRBP", "财务分析师", "审计专员"
-  ];
-  var best = "";
-  for (var i = 0; i < suffixes.length; i++) {
-    var idx = text.indexOf(suffixes[i]);
-    if (idx !== -1) {
-      // 往前抓修饰词
-      var start = Math.max(0, idx - 20);
-      var chunk = text.slice(start, idx + suffixes[i].length);
-      var cand = cleanTitle(chunk);
-      if (cand.length > best.length) best = cand;
-    }
+function guessTitle(text, docTitle, candidates) {
+  // 1) 候选池：文档标题 + 页面结构化线索 + 正文标签跟随
+  var pool = [];
+  function add(s) {
+    if (!s) return;
+    s = s.replace(/\s+/g, " ").trim();
+    if (s.length >= 2 && s.length <= 60) pool.push(s);
   }
-  if (best) return best;
+  if (docTitle) {
+    add(docTitle);
+    docTitle.split(/[-_|–—/·:：\s]+/).forEach(add);
+  }
+  if (candidates) {
+    if (typeof candidates.forEach === "function") candidates.forEach(add);
+    else if (typeof candidates === "string") add(candidates);
+  }
+  if (text) {
+    var lr = /(应聘职位|申请职位|应聘岗位|申请岗位|职位名称|岗位名称|招聘职位|投递职位|报考职位|应聘方向|意向岗位|求职意向|岗位)[：:\s]*([^\n：:，,。；;]{2,30})/g;
+    var m;
+    while ((m = lr.exec(text)) !== null) add(m[2]);
+  }
 
-  // ③ 宽泛后缀兜底
-  m = text.match(/([一-龥A-Za-z·]{2,16}?(?:工程师|开发|分析师|管培|运营|产品|测试|算法|研发|实习生|专员|经理|总监|架构师|设计师|专家))/);
-  if (m) return cleanTitle(m[1]);
+  // 2) 从候选里挑最像"岗位名"的（强岗位词加权，过长/过短/非岗位词降权）
+  var JOB_HINT = /(工程师|开发|分析师|管培|运营|产品|测试|算法|研发|实习|专员|经理|架构师|设计师|专家|岗|职位|助理|顾问|技术|销售|市场|财务|人力|支持|培训|项目|数据|前端|后端|全栈|移动|嵌入|硬件|芯片|运维|DBA|DevOps|SRE|QA|Java|Python|Go)/i;
+  var STRONG = /(工程师|分析师|管培生|架构师|设计师|专员|经理|顾问|专家|助理|开发|运营|产品|测试|算法|研发)/;
+  var NON_JOB = /^(网申投递|网申|投递|申请|记录|公司介绍|招聘类型|我的应聘|申请记录|投递记录|提交成功|报名成功|简历|登录|注册|首页|个人中心|我的|成功|完成|确认)$/i;
+  var best = "", bestScore = -1;
+  for (var i = 0; i < pool.length; i++) {
+    var c = cleanTitle(pool[i]);
+    if (!c || NON_JOB.test(c)) continue;
+    var score = 0;
+    if (JOB_HINT.test(c)) score += 10;
+    if (STRONG.test(c)) score += 5;
+    score -= Math.abs(c.length - 8);
+    if (score > bestScore) { bestScore = score; best = c; }
+  }
+  if (best && bestScore >= 0) return best;
 
+  // 3) 兜底：正文后缀匹配（不依赖候选）
+  if (text) {
+    text = text.replace(/\s+/g, " ");
+    var suffixes = [
+      "开发工程师", "软件开发工程师", "大数据平台开发工程师", "前端开发工程师", "后端开发工程师",
+      "全栈工程师", "算法工程师", "机器学习工程师", "深度学习工程师", "NLP工程师",
+      "数据分析师", "数据科学家", "数据开发工程师", "数据仓库工程师", "BI工程师",
+      "产品经理", "产品运营", "用户运营", "内容运营", "增长运营",
+      "测试工程师", "自动化测试", "测试开发", "QA工程师",
+      "运维工程师", "DevOps工程师", "SRE工程师", "DBA",
+      "嵌入式工程师", "硬件工程师", "芯片设计", "IC设计",
+      "管培生", "管理培训生", "储备干部",
+      "解决方案架构师", "技术支持工程师", "售前工程师",
+      "数字化与数据开发工程师", "数字化专员", "数字化转型顾问",
+      "Java开发", "Python开发", "Go开发", "C++开发", "前端开发", "后端开发",
+      "Android开发", "iOS开发", "移动端开发",
+      "视觉设计师", "UI设计师", "UX设计师", "交互设计师",
+      "人力资源专员", "HRBP", "财务分析师", "审计专员"
+    ];
+    var best2 = "";
+    for (var j = 0; j < suffixes.length; j++) {
+      var idx = text.indexOf(suffixes[j]);
+      if (idx !== -1) {
+        var start = Math.max(0, idx - 20);
+        var chunk = text.slice(start, idx + suffixes[j].length);
+        var cand = cleanTitle(chunk);
+        if (cand.length > best2.length) best2 = cand;
+      }
+    }
+    if (best2) return best2;
+
+    var m2 = text.match(/([一-龥A-Za-z·]{2,16}?(?:工程师|开发|分析师|管培|运营|产品|测试|算法|研发|实习生|专员|经理|总监|架构师|设计师|专家))/);
+    if (m2) return cleanTitle(m2[1]);
+  }
   return "";
 }
 

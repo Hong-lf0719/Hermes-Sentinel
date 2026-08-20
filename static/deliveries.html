@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>投递进度 · Hermes Sentinel</title>
+<style>
+  :root{
+    --bg:#0f172a; --card:#1e293b; --card2:#273449; --line:#334155;
+    --txt:#e2e8f0; --sub:#94a3b8; --acc:#38bdf8; --good:#22c55e; --warn:#f59e0b; --bad:#ef4444;
+    --c-已投:#38bdf8; --c-笔试:#a78bfa; --c-面试:#f59e0b; --c-OC:#22c55e; --c-挂:#ef4444;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}
+  header{padding:14px 16px;position:sticky;top:0;background:rgba(15,23,42,.94);backdrop-filter:blur(8px);z-index:10;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:17px}
+  .sub{color:var(--sub);font-size:12px;margin-top:2px}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--line);align-items:center}
+  button{cursor:pointer;border:none;border-radius:8px;padding:8px 12px;font-size:13px;font-weight:600}
+  .btn-refresh{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+  .btn-go{background:var(--card2);color:var(--acc);border:1px solid var(--line);text-decoration:none}
+  /* 汇总胶囊 */
+  .sum{padding:12px 16px;display:flex;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
+  .chip{display:flex;flex-direction:column;align-items:center;min-width:62px;padding:8px 10px;border-radius:12px;background:var(--card);border:1px solid var(--line)}
+  .chip .n{font-size:20px;font-weight:800;line-height:1}
+  .chip .t{font-size:11px;color:var(--sub);margin-top:3px}
+  .chip.ongoing{border-color:var(--acc);background:#0c2c3e}
+  .chip.ongoing .n{color:var(--acc)}
+  /* 卡片 */
+  .list{padding:12px 16px;display:grid;gap:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;position:relative}
+  .card.dead{border-color:var(--bad)}
+  .ctop{display:flex;align-items:flex-start;gap:10px}
+  .score{flex:0 0 auto;width:42px;height:42px;border-radius:10px;background:var(--card2);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;color:var(--acc)}
+  .cmain{flex:1;min-width:0}
+  .company{font-weight:700;font-size:15px}
+  .title{color:var(--sub);font-size:13px;margin-top:1px}
+  .meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;color:var(--sub);font-size:12px}
+  .meta span{background:var(--card2);padding:3px 8px;border-radius:6px}
+  .dl-urgent{color:var(--warn)}
+  .dl-dead{color:var(--bad)}
+  /* 漏斗进度 */
+  .pipe{display:flex;align-items:center;gap:0;margin-top:12px;flex-wrap:wrap}
+  .stage{display:flex;align-items:center;gap:6px}
+  .dot{width:13px;height:13px;border-radius:50%;background:var(--card2);border:2px solid var(--line);position:relative}
+  .stage.done .dot{background:var(--good);border-color:var(--good)}
+  .stage.cur .dot{background:var(--acc);border-color:var(--acc);box-shadow:0 0 0 3px rgba(56,189,248,.25)}
+  .stage.rej .dot{background:var(--bad);border-color:var(--bad)}
+  .slabel{font-size:12px;color:var(--sub)}
+  .stage.cur .slabel{color:var(--acc);font-weight:700}
+  .stage.done .slabel{color:var(--txt)}
+  .arrow{color:var(--line);margin:0 4px;font-size:12px}
+  .stage.rej{margin-left:auto}
+  /* 操作行 */
+  .actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;align-items:center}
+  .sg{display:flex;gap:4px;flex-wrap:wrap}
+  .sg button{padding:5px 10px;font-size:12px;font-weight:600;background:var(--card2);color:var(--sub);border:1px solid var(--line)}
+  .sg button.on{color:#04293a;border-color:transparent}
+  .sg button[data-st="已投"].on{background:var(--c-已投)}
+  .sg button[data-st="笔试"].on{background:var(--c-笔试);color:#1a1030}
+  .sg button[data-st="面试"].on{background:var(--c-面试);color:#2a1c00}
+  .sg button[data-st="OC"].on{background:var(--c-OC);color:#04220f}
+  .sg button[data-st="挂"].on{background:var(--c-挂)}
+  .apply{margin-left:auto;padding:6px 12px;border-radius:8px;background:var(--acc);color:#04293a;font-weight:700;font-size:12px;text-decoration:none}
+  .apply.nolink{background:var(--card2);color:var(--sub)}
+  .empty{padding:40px 16px;text-align:center;color:var(--sub)}
+  .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(20px);background:#0c2c3e;border:1px solid var(--acc);color:var(--acc);padding:10px 18px;border-radius:10px;opacity:0;transition:.2s;pointer-events:none;font-size:13px;z-index:50}
+  .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+  <header>
+    <h1>📮 投递进度</h1>
+    <div class="sub">所有真实投递（已投→笔试→面试→OC），永不因匹配分被隐藏 · 点状态即时更新</div>
+  </header>
+  <div class="bar">
+    <button class="btn-refresh" onclick="load()">↻ 刷新</button>
+    <a class="btn-go" href="/jobs">← 回到岗位看板</a>
+  </div>
+  <div class="sum" id="sum"></div>
+  <div class="list" id="list"></div>
+  <div class="toast" id="toast"></div>
+
+<script>
+const STAGES = ["已投","笔试","面试","OC"];          // 正向漏斗
+const RANK = {"已投":1,"笔试":2,"面试":3,"OC":4};
+let AUTH_TOKEN = "__WEB_TOKEN__";
+
+function toast(m){const t=document.getElementById("toast");t.textContent=m;t.classList.add("on");setTimeout(()=>t.classList.remove("on"),1800);}
+function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+function fmtDate(s){ // first_seen 可能为 2026-08-18 或空
+  if(!s) return "";
+  return s.slice(0,10);
+}
+
+function pipeHTML(j){
+  const cur = RANK[j.status] || 0;
+  let html = '<div class="pipe">';
+  STAGES.forEach((st,i)=>{
+    const r = RANK[st];
+    let cls = "";
+    if(r < cur) cls="done"; else if(r===cur) cls="cur";
+    html += `<div class="stage ${cls}"><span class="dot"></span><span class="slabel">${st}</span></div>`;
+    if(i < STAGES.length-1) html += '<span class="arrow">→</span>';
+  });
+  if(j.status==="挂"){
+    html += `<div class="stage rej"><span class="dot"></span><span class="slabel">挂</span></div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+function cardHTML(j){
+  const dead = (j.match_reason||"").indexOf("已过期")>=0;
+  const dlCls = (j.match_reason||"").indexOf("已过期")>=0 ? "dl-dead" : ((j.match_reason||"").indexOf("⚠")>=0 ? "dl-urgent" : "");
+  const meta=[
+    j.city&&`📍 ${esc(j.city)}`,
+    j.education&&`🎓 ${esc(j.education)}`,
+    j.deadline&&`<span class="${dlCls}">⏰ ${esc(j.deadline)}</span>`,
+    j.salary&&`💰 ${esc(j.salary)}`,
+    j.source&&`📡 ${esc(j.source)}`,
+    j.first_seen&&`🗓 投递 ${fmtDate(j.first_seen)}`,
+  ].filter(Boolean).map(x=>x.indexOf("<span")===0?x:`<span>${x}</span>`).join("");
+  const sg = ["已投","笔试","面试","OC","挂"].map(st=>
+    `<button data-st="${st}" class="${st===j.status?'on':''}" onclick="setStatus('${j.raw_hash}','${st}',this)">${st}</button>`).join("");
+  const link = j.url
+    ? `<a class="apply" href="${esc(j.url)}" target="_blank" rel="noopener">去投递页 ↗</a>`
+    : `<span class="apply nolink">无链接</span>`;
+  return `<div class="card ${j.status==='挂'?'dead':''}" data-hash="${j.raw_hash}">
+    <div class="ctop">
+      <div class="score">${j.match_score||0}</div>
+      <div class="cmain">
+        <div class="company">${esc(j.company)}</div>
+        <div class="title">${esc(j.title)}</div>
+      </div>
+    </div>
+    <div class="meta">${meta}</div>
+    ${pipeHTML(j)}
+    <div class="actions">
+      <div class="sg">${sg}</div>
+      ${link}
+    </div>
+  </div>`;
+}
+
+async function load(){
+  try{
+    const r = await fetch("/api/deliveries");
+    const d = await r.json();
+    renderSum(d);
+    const list = document.getElementById("list");
+    if(!d.jobs.length){
+      list.innerHTML = '<div class="empty">还没有任何投递记录。<br>在岗位看板点「已投」标记，或用浏览器扩展「记录本次投递」即可出现在这里。</div>';
+      return;
+    }
+    list.innerHTML = d.jobs.map(cardHTML).join("");
+  }catch(e){
+    document.getElementById("list").innerHTML = '<div class="empty">加载失败，确认 Hermes 服务在运行。</div>';
+  }
+}
+
+function renderSum(d){
+  const c = d.counts||{};
+  const chips = [
+    {t:"已投", n:c["已投"]||0, cls:""},
+    {t:"笔试", n:c["笔试"]||0, cls:""},
+    {t:"面试", n:c["面试"]||0, cls:""},
+    {t:"OC",  n:c["OC"]||0,  cls:""},
+    {t:"挂",  n:c["挂"]||0,  cls:""},
+    {t:"进行中", n:d.ongoing||0, cls:"ongoing"},
+  ];
+  document.getElementById("sum").innerHTML = chips.map(x=>
+    `<div class="chip ${x.cls}"><div class="n">${x.n}</div><div class="t">${x.t}</div></div>`).join("");
+}
+
+async function setStatus(hash,status,btn){
+  await fetch("/api/jobs/"+hash+"/status",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","Authorization":"Bearer "+AUTH_TOKEN},
+    body:JSON.stringify({status})
+  });
+  const grp=btn.parentElement;
+  grp.querySelectorAll("button").forEach(b=>b.classList.remove("on"));
+  btn.classList.add("on");
+  toast("标记为："+status);
+  load(); // 重算汇总 + 漏斗
+}
+
+load();
+</script>
+</body>
+</html>

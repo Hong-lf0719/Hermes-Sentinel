@@ -28,6 +28,7 @@ import os
 import re
 
 import certifi
+from ..matcher import detect_exam_free
 from ..models import Job
 from .base import SourceAdapter
 
@@ -55,6 +56,11 @@ KEYWORDS = [
     "机器学习", "深度学习", "数据开发", "数仓",
 ]
 
+# 城市关键词——keyword 是全文匹配（含工作地），用城市名搜能精准命中目标地区岗。
+# 实测：keyword="武汉" total=349（首屏 14/20 城市在武汉）；"孝感" total=18（12 孝感）。
+# 方向词只能覆盖排名靠前的全国岗，武汉岗大多排不进前 8 页——城市词补这个缺口。
+CITY_KEYWORDS = ("武汉", "孝感", "湖北")
+
 GP_MAX_PAGES = 8          # 单个关键词最多翻几页（8*20=160 条/词）
 GP_PAGE_SIZE = 20         # 每页条数
 GP_DELAY = 0.8            # 页间间隔（秒）
@@ -72,7 +78,10 @@ def _clean_city(district_list: list[dict] | None) -> str:
     # 取第一个工作地点的城市部分："银川-西夏区" -> "银川"
     area = (district_list[0].get("area_cn") or "").strip()
     if "-" in area:
-        return area.split("-")[0]
+        area = area.split("-")[0]
+    # 国聘返回"武汉市"，其他源是"武汉"——去掉"市"后缀统一口径（保两字以上）
+    if area.endswith("市") and len(area) > 2:
+        area = area[:-1]
     return area or ""
 
 
@@ -92,26 +101,40 @@ def _build_salary(item: dict) -> str:
 
 
 def _map_nature(nature_cn: str) -> str:
-    """将国聘的 nature_cn 归一化为 央企/国企/民企/外企。"""
+    """将国聘 company_info.nature_cn 归一化为 央企/国企/民企/外企/事业单位。
+
+    注意：国聘列表接口顶层 nature_cn 是「招聘类型」（校招/社招），
+    企业性质在 company_info.nature_cn 里，别用错字段（历史 bug）。
+    """
     s = (nature_cn or "").strip()
     if any(k in s for k in ["央企", "中央"]):
         return "央企"
-    if any(k in s for k in ["国企", "国有"]):
+    if any(k in s for k in ["国企", "国有"]) or "银行" in s:
         return "国企"
-    if any(k in s for k in ["外企", "合资", "独资"]):
+    if any(k in s for k in ["事业", "机关", "院校"]):
+        return "事业单位"
+    if any(k in s for k in ["外企", "合资", "独资", "外资", "外商"]):
         return "外企"
     if any(k in s for k in ["民营", "私企", "民企"]):
         return "民企"
-    return s or ""
+    # 兜底：无法判断国资/民资背景的值（股份制/上市/非营利/民办非企业等）统一归"其他"
+    return "其他" if s else ""
 
 
 def _map_batch(recruitment_type_cn: str, is_graduates: bool) -> str:
-    """判断是否校招批次。"""
+    """判断招聘批次。
+
+    社招判断必须放在 is_graduates 之前——实测社招岗的 is_graduates 也可能为 True。
+    "社招"不在画像 batches 枚举里，会被 hard_filter 拦下（应届生不投社招），
+    避免"AI研发专家"这类社招岗混进高分榜。
+    """
     t = (recruitment_type_cn or "")
-    if is_graduates or "校园" in t or "校招" in t:
-        return "秋招"
     if "实习" in t:
         return "实习"
+    if "社会招聘" in t or "社招" in t:
+        return "社招"
+    if is_graduates or "校园" in t or "校招" in t:
+        return "秋招"
     return ""
 
 
@@ -167,6 +190,9 @@ class GuopinSource(SourceAdapter):
         if not title or not company:
             return None
         jid = item.get("job_id") or ""
+        ci = item.get("company_info") or {}
+        nature = _map_nature(ci.get("nature_cn") or "")
+        contents = (item.get("contents") or "").strip()
         return Job(
             company=company,
             title=title,
@@ -180,10 +206,13 @@ class GuopinSource(SourceAdapter):
             url=DETAIL_TPL.format(job_id=jid) if jid else "",
             link_type="简章详情",
             source="国聘网",
-            nature=_map_nature(item.get("nature_cn") or ""),
+            nature=nature,
+            enterprise_type=nature,      # 国聘直接给出企业性质，跳过 matcher 推断
             industry=item.get("category_cn") or "",
             major="、".join(item.get("major_cn") or []),
             salary=_build_salary(item),
+            jd_text=contents[:1200],
+            exam_free=detect_exam_free(f"{title} {contents[:600]}"),
         )
 
     async def fetch(self, profile: dict) -> list[Job]:  # noqa: D102
@@ -202,8 +231,8 @@ class GuopinSource(SourceAdapter):
             all_items: list[dict] = []
             seen_ids: set[str] = set()
 
-            # 关键词搜索 + 去重
-            for kw in KEYWORDS:
+            # 关键词搜索 + 去重（方向词全国保底 + 城市词精准补充目标地区岗）
+            for kw in (*KEYWORDS, *CITY_KEYWORDS):
                 items = await self._collect_keyword(cli, token, kw)
                 for it in items:
                     jid = it.get("job_id")

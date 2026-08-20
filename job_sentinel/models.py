@@ -24,7 +24,9 @@ class Job:
     url: str = ""                # 投递链接（经 company_links.resolve_url 解析后必定可跳转）
     link_type: str = ""          # 链接质量：官方校招页 / 源详情页 / 搜索直达
     source: str = ""             # 来源站，如 "offer多多"
-    nature: str = ""             # 央企/国企/民企/外企
+    nature: str = ""             # 单位性质原文（各源原始值，如 "外商投资企业"）
+    enterprise_type: str = ""    # 归一化企业性质：央企/国企/民企/外企/事业单位/其他（空=未标注）
+    exam_free: str = ""          # 笔试标注三态：免笔试 / 有笔试 / ""(未知)
     industry: str = ""           # 行业
     major: str = ""              # 专业要求
     school_level: str = ""       # 院校要求，如 "双非可投"
@@ -34,6 +36,7 @@ class Job:
     match_reason: str = ""       # 一句话推荐理由
     status: str = "新"           # 投递状态
     raw_hash: str = ""           # 去重指纹
+    jd_text: str = ""            # JD 正文摘要（enrich/源自带，用于免笔试等信号提取）
 
     def dedup_hash(self) -> str:
         base = f"{self.company}|{self.title}|{self.city}".strip().lower()

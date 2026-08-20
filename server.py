@@ -16,6 +16,7 @@ import os
 import re
 import ssl
 import json
+import sys
 import time
 import asyncio
 import logging
@@ -26,6 +27,14 @@ import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+# Windows GBK 控制台/pythonw 下打印 emoji（启动横幅等）会 UnicodeEncodeError 崩溃，
+# 统一把标准流切到 UTF-8 + replace，禁止任何打印拖垮服务。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # RAG 长期知识库（hermes_rag 包，需与 server.py 同目录）
 from hermes_rag import retrieve_context, get_store
@@ -178,11 +187,21 @@ static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+# 全局关停信号：Caspian 监听线程靠它退出重连循环（守护线程不设标记会一直重连）
+import threading as _threading
+_SHUTDOWN = _threading.Event()
+
+
 # Caspian 邮件渠道作为后台协程启动（用 uvicorn.run 标准入口时，
 # 靠 startup 事件拉起，避免 Windows 下 asyncio.run + Server.serve 的信号冲突）
 @app.on_event("startup")
 async def _startup_caspian():
     asyncio.create_task(start_caspian())
+
+
+@app.on_event("shutdown")
+async def _shutdown_signal():
+    _SHUTDOWN.set()
 
 # ============================================================
 # System Prompt
@@ -2070,12 +2089,127 @@ async def jobs_page():
     return HTMLResponse(html)
 
 
+@app.get("/deliveries", response_class=HTMLResponse)
+async def deliveries_page():
+    p = static_dir / "deliveries.html"
+    if not p.exists():
+        return HTMLResponse("<h1>投递进度</h1>")
+    # 注入 WEB_TOKEN 到占位符，前端不再需要 fetch /api/token
+    html = p.read_text("utf-8").replace("__WEB_TOKEN__", WEB_TOKEN)
+    return HTMLResponse(html)
+
+
 @app.get("/api/jobs")
-async def api_jobs(status: str = "", batch: str = "", city: str = "", min_score: int = 0):
+async def api_jobs(
+    status: str = "",
+    batch: str = "",
+    city: str = "",
+    min_score: int = 0,
+    max_score: int = 0,
+    source: str = "",
+    nature: str = "",
+    enterprise_type: str = "",
+    exam_free: str = "",
+    sort: str = "score",
+    urgent_days: int = 0,
+    include_hidden: bool = False,
+    only_region: bool = False,
+    edu_filter: bool = False,
+):
+    """岗位列表。
+
+    新增筛选：source（来源）/ nature（单位性质）/ max_score（配合分档）/
+    sort（score|deadline|new）/ urgent_days（只看 N 天内截止）/
+    include_hidden（含「标记不投」的岗位）。
+    地区聚焦(only_region) 与 学历门槛(edu_filter) 默认关闭——全量可见，
+    由看板开关触发，按画像做语义过滤（见 job_sentinel.store）。
+    """
+    from pathlib import Path as _P
     from job_sentinel.store import get_db as js_get_db, get_jobs
+    from job_sentinel.profile import load_profile
+    from job_sentinel.matcher import days_to_deadline, suggest_fill
+
+    prof_path = _P(__file__).parent / "job_sentinel" / "profile.json"
+    profile = load_profile(prof_path)
+    # 仅当开关开启时才把画像的地区/学历门槛作为过滤条件，否则全量可见
+    regions = profile.get("regions") if only_region else None
+    edu_thr = profile.get("edu_threshold") if (edu_filter and profile.get("edu_threshold") != "不限") else None
     with js_get_db(str(DB_PATH)) as c:
-        jobs = get_jobs(c, {"status": status, "batch": batch, "city": city, "min_score": min_score})
-    return {"jobs": [j.to_dict() for j in jobs], "count": len(jobs)}
+        jobs = get_jobs(c, {
+            "status": status, "batch": batch, "city": city,
+            "min_score": min_score, "max_score": max_score,
+            "source": source, "nature": nature, "sort": sort,
+            "enterprise_type": enterprise_type, "exam_free": exam_free,
+            "include_hidden": include_hidden,
+            "regions": regions,
+            "edu_threshold": edu_thr,
+        })
+    # 「N 天内截止」需按日期解析过滤，SQL 里 deadline 是混合格式文本做不了
+    if urgent_days > 0:
+        picked = []
+        for j in jobs:
+            d = days_to_deadline(j)
+            if d is not None and 0 <= d <= urgent_days:
+                picked.append(j)
+        jobs = picked
+
+    # 补全建议：仅对 industry/major 为空的岗，按标题启发式给「建议方向」，不落库
+    out = []
+    for j in jobs:
+        d = j.to_dict()
+        sug = suggest_fill(j)
+        if sug:
+            d["suggest"] = sug
+        out.append(d)
+    return {"jobs": out, "count": len(out)}
+
+
+@app.get("/api/deliveries")
+async def api_deliveries():
+    """投递进度：返回所有已产生投递行为（已投/笔试/面试/OC/挂）的岗位。
+
+    与匹配分无关——投递是真实动作，永不因分数被过滤。
+    排序：阶段倒序（OC>面试>笔试>已投>挂） + 投递时间倒序 + 匹配分倒序。
+    """
+    from job_sentinel.models import Job
+    from job_sentinel.store import get_db as js_get_db
+    RANK = {"OC": 5, "面试": 4, "笔试": 3, "已投": 2, "挂": 1}
+    with js_get_db(str(DB_PATH)) as c:
+        rows = c.execute(
+            "SELECT * FROM jobs WHERE status IN ('已投','笔试','面试','OC','挂') "
+            "ORDER BY CASE status WHEN 'OC' THEN 5 WHEN '面试' THEN 4 WHEN '笔试' THEN 3 "
+            "WHEN '已投' THEN 2 WHEN '挂' THEN 1 ELSE 0 END DESC, "
+            "first_seen DESC, match_score DESC"
+        ).fetchall()
+        jobs = [Job.from_dict(dict(r)) for r in rows]
+    out = []
+    for j in jobs:
+        d = j.to_dict()
+        d["stage_rank"] = RANK.get(j.status, 0)
+        out.append(d)
+    counts = {}
+    for j in jobs:
+        counts[j.status] = counts.get(j.status, 0) + 1
+    ongoing = counts.get("已投", 0) + counts.get("笔试", 0) + counts.get("面试", 0)
+    return {"jobs": out, "count": len(out), "counts": counts,
+            "ongoing": ongoing, "statuses": ["已投", "笔试", "面试", "OC", "挂"]}
+
+
+@app.post("/api/jobs/rescore", dependencies=[Depends(require_auth)])
+async def api_jobs_rescore():
+    """用当前画像+打分规则重算全库分数（秒级，不重抓）。"""
+    from pathlib import Path as _P
+    from job_sentinel.store import get_db as js_get_db, rescore_all
+    from job_sentinel.profile import load_profile
+    prof_path = _P(__file__).parent / "job_sentinel" / "profile.json"
+    try:
+        profile = load_profile(prof_path)   # 经 load_profile 做字段迁移（旧方向标签→新类别）
+        with js_get_db(str(DB_PATH)) as c:
+            res = rescore_all(c, profile)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"重算分数失败: {e}")
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+    return {"ok": True, **res}
 
 
 @app.post("/api/jobs/{raw_hash}/status", dependencies=[Depends(require_auth)])
@@ -2086,6 +2220,77 @@ async def api_job_status(raw_hash: str, request: Request):
     with js_get_db(str(DB_PATH)) as c:
         update_status(c, raw_hash, status)
     return {"ok": True, "raw_hash": raw_hash, "status": status}
+
+
+@app.post("/api/jobs/{raw_hash}/hide", dependencies=[Depends(require_auth)])
+async def api_job_hide(raw_hash: str):
+    """标记不投（看板隐藏，非删除）。"""
+    from job_sentinel.store import get_db as js_get_db, set_hidden
+    with js_get_db(str(DB_PATH)) as c:
+        set_hidden(c, raw_hash, True)
+    return {"ok": True, "raw_hash": raw_hash, "hidden": True}
+
+
+@app.post("/api/jobs/{raw_hash}/unhide", dependencies=[Depends(require_auth)])
+async def api_job_unhide(raw_hash: str):
+    """恢复「标记不投」的岗位。"""
+    from job_sentinel.store import get_db as js_get_db, set_hidden
+    with js_get_db(str(DB_PATH)) as c:
+        set_hidden(c, raw_hash, False)
+    return {"ok": True, "raw_hash": raw_hash, "hidden": False}
+
+
+@app.post("/api/jobs/{raw_hash}/adopt", dependencies=[Depends(require_auth)])
+async def api_job_adopt(raw_hash: str, request: Request):
+    """采纳「补全建议」：把推断的 industry/major 写回岗位记录（仅补空字段），
+    并立即用新字段重算该岗分数，让方向匹配更准。
+    """
+    from job_sentinel.store import get_db as js_get_db, adopt_fill, rescore_all
+    from job_sentinel.profile import load_profile
+    from pathlib import Path as _P
+    data = await request.json()
+    fill = {k: v for k, v in (data or {}).items() if k in ("industry", "major")}
+    prof_path = _P(__file__).parent / "job_sentinel" / "profile.json"
+    with js_get_db(str(DB_PATH)) as c:
+        ok = adopt_fill(c, raw_hash, fill)
+        if ok:
+            rescore_all(c, load_profile(prof_path))
+    return {"ok": ok, "raw_hash": raw_hash}
+
+
+@app.get("/api/jobs/hidden_count")
+async def api_hidden_count():
+    """「标记不投」的岗位数量（看板恢复条用）。"""
+    from job_sentinel.store import get_db as js_get_db
+    with js_get_db(str(DB_PATH)) as c:
+        n = c.execute("SELECT COUNT(*) n FROM jobs WHERE user_hidden=1").fetchone()["n"]
+    return {"count": n}
+
+
+@app.post("/api/scan", dependencies=[Depends(require_auth)])
+async def api_scan():
+    """手动触发哨兵扫描：重抓各源（含国聘全国岗）并入库，返回统计。
+
+    前端「扫岗位」按钮直连此接口，不走 /chat 的 LLM 路由（更快更稳）。
+    """
+    from job_sentinel.scan import scan_and_match
+    from pathlib import Path as _P
+    base = _P(__file__).parent
+    try:
+        res = await scan_and_match(
+            db_path=str(DB_PATH),
+            profile_path=str(base / "job_sentinel" / "profile.json"),
+            seed_path=str(base / "job_sentinel" / "seed_jobs.json"),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"哨兵扫描失败: {e}")
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+    return {
+        "ok": True,
+        "collected": res.get("collected", 0),
+        "kept": res.get("kept", 0),
+        "new": res.get("new", 0),
+    }
 
 
 @app.post("/api/extension/apply")
@@ -2101,22 +2306,57 @@ async def api_extension_apply(request: Request):
     url = (data or {}).get("url", "").strip()
     note = (data or {}).get("note", "").strip()
     from job_sentinel.store import get_db as js_get_db, upsert_job, update_status
-    from job_sentinel.email_sync import match_company
+    from job_sentinel.email_sync import (
+        reconcile_company, normalize_company, find_extension_row, _advance_ok,
+    )
     from job_sentinel.models import Job
     with js_get_db(str(DB_PATH)) as c:
+        c.row_factory = sqlite3.Row
         pool = [r["company"] for r in c.execute("SELECT DISTINCT company FROM jobs")]
-        matched = match_company(company, pool)[0] if company else ""
-        if matched:
-            row = c.execute(
-                "SELECT raw_hash,url FROM jobs WHERE company=? ORDER BY match_score DESC LIMIT 1",
-                (matched,),
-            ).fetchone()
+        canon, score, kind = reconcile_company(company, pool, url)
+        # ① 命中库内已有公司（含别名/域名回推）→ 回写漏斗，即"投到已跟踪公司"同步
+        if canon and kind in ("pool", "alias"):
+            # 先按 公司+岗位 匹配（投"软件工程师"不能改到"游戏客户端"行上），再退回该公司最高分行
+            row = None
+            if title:
+                row = c.execute(
+                    """SELECT raw_hash,url,status FROM jobs
+                       WHERE company=? AND (title LIKE ? OR ? LIKE '%'||?||'%')
+                       ORDER BY match_score DESC LIMIT 1""",
+                    (canon, f"%{title}%", title, title),
+                ).fetchone()
+            if row is None:
+                row = c.execute(
+                    "SELECT raw_hash,url,status FROM jobs WHERE company=? ORDER BY match_score DESC LIMIT 1",
+                    (canon,),
+                ).fetchone()
             if row:
-                update_status(c, row["raw_hash"], "已投")
-                return {"ok": True, "company": matched, "matched": True,
-                        "status": "已投", "job_url": row["url"]}
+                final = "已投" if _advance_ok(row["status"], "已投") else row["status"]
+                update_status(c, row["raw_hash"], final)
+                # 已有扩展自有投递行（公司名口径不同）→ 同步状态，避免留下旧的"已投"行
+                ext = find_extension_row(c, [company, canon])
+                if ext is not None and ext["raw_hash"] != row["raw_hash"]:
+                    ext_final = "已投" if _advance_ok(ext["status"], "已投") else ext["status"]
+                    update_status(c, ext["raw_hash"], ext_final)
+                return {"ok": True, "company": canon, "matched": True,
+                        "status": final, "job_url": row["url"], "via": kind}
+        # ② 扩展自有投递：按归一公司查重（多口径），重复捕获只更新不新建
+        norm = normalize_company(company)
+        if norm or canon:
+            exist = find_extension_row(c, [norm, canon])
+            if exist:
+                final = "已投" if _advance_ok(exist["status"], "已投") else exist["status"]
+                update_status(c, exist["raw_hash"], final)
+                c.execute(
+                    "UPDATE jobs SET title=?, url=?, match_reason=? WHERE raw_hash=?",
+                    (title or "网申投递", url, note or "浏览器扩展网申记录", exist["raw_hash"]),
+                )
+                return {"ok": True, "company": exist["company"], "matched": True,
+                        "status": final, "job_url": url, "via": "dedup"}
+        # ③ 新建：归一后是真实新公司 / 域名推断 / 兜底未知
+        final_company = canon if kind in ("domain", "new") else (norm or "未知公司")
         job = Job(
-            company=company or "未知公司",
+            company=final_company,
             title=title or "网申投递",
             city="", education="", batch="", deadline="",
             url=url, link_type="源详情页", source="浏览器扩展",
@@ -2126,8 +2366,22 @@ async def api_extension_apply(request: Request):
             status="已投",
         )
         upsert_job(c, job)
-        return {"ok": True, "company": job.company, "matched": False,
-                "status": "已投", "job_url": url, "new": True}
+        # 库外新公司：自动搜 JD/要求 + 匹配度补全，让看板上能看到公司信息
+        enriched_info = None
+        try:
+            q = f"{job.company} {job.title} 招聘 岗位职责 任职要求".strip()
+            md = await web_search(q, 5)
+            from job_sentinel.enrich import enrich_job_from_search
+            enriched_info = enrich_job_from_search(
+                job.raw_hash, job.company, job.title, md, str(DB_PATH)
+            )
+        except Exception as e:
+            logger.warning(f"补全公司 {job.company} 失败: {e}")
+        resp = {"ok": True, "company": job.company, "matched": kind != "none",
+                "status": "已投", "job_url": url, "new": True, "via": kind}
+        if enriched_info:
+            resp["enriched"] = enriched_info
+        return resp
 
 
 @app.post("/api/extension/deliveries")
@@ -2139,10 +2393,11 @@ async def api_extension_deliveries(request: Request):
         return JSONResponse(status_code=401, content={"ok": False, "error": "unauthorized"})
     data = await request.json()
     rows = (data or {}).get("rows", []) or []
+    url = (data or {}).get("url", "") or ""
     if not isinstance(rows, list):
         rows = []
     from job_sentinel.email_sync import parse_delivery_list
-    result = parse_delivery_list(rows, str(DB_PATH))
+    result = parse_delivery_list(rows, str(DB_PATH), url)
     # 补全库外新建的真实投递公司：自动搜 JD/要求 + 复用 matcher 算匹配度
     enriched = []
     for item in result.get("created", [])[:8]:  # 一次最多补全前 8 家，避免列表页过大卡接口
@@ -2175,6 +2430,21 @@ async def api_profile_post(request: Request):
     from pathlib import Path
     base = Path(__file__).parent
     return save_profile(data or {}, base / "job_sentinel" / "profile.json")
+
+
+@app.get("/api/profile/options")
+async def api_profile_options():
+    """聚合岗位库真实分布，给画像设置页提供「可勾选」选项（城市/公司/性质/方向…）。"""
+    from job_sentinel.store import get_db as js_get_db, get_profile_options
+    with js_get_db(str(DB_PATH)) as c:
+        return get_profile_options(c)
+
+
+@app.get("/api/profile/suggest")
+async def api_profile_suggest(kw: str = ""):
+    """关键词/专业 → 推荐相关方向类别。前端「写AI开发→推荐相关方向」用。"""
+    from job_sentinel.matcher import suggest_directions
+    return {"directions": suggest_directions(kw)}
 
 
 # ============================================================
@@ -2212,12 +2482,19 @@ async def start_caspian():
         import threading
 
         def _run_listen():
-            while not getattr(server_state, "stop_flag", False):
+            # 断线自愈：listen() 抛异常（网络抖动/SDK 内部错）后 5 秒重连，
+            # 否则邮件渠道会永久离线。关停时由 _SHUTDOWN 事件跳出，不再重连。
+            fails = 0
+            while not _SHUTDOWN.is_set():
                 try:
                     client.listen()  # 同步阻塞死循环，在守护线程里跑，绝不阻塞主循环
+                    fails = 0
                 except Exception as e:
-                    logger.error(f"Caspian listen 异常，5 秒后重连: {e}")
-                    time.sleep(5)
+                    fails += 1
+                    logger.error(f"Caspian listen 异常（第 {fails} 次），5 秒后重连: {e}")
+                # 用 wait 而非 sleep：关停时能立刻醒来退出，不用干等 5 秒
+                if _SHUTDOWN.wait(5):
+                    break
 
         threading.Thread(target=_run_listen, daemon=True, name="caspian-listen").start()
         print("🤖 Hermes 全渠道已就绪")

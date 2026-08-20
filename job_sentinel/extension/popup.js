@@ -19,7 +19,7 @@ async function main() {
   const ex = await extract();
   if (!ex) { setStatus("无法获取当前页", false); return; }
   const co = guessCompany(ex.title, ex.url) || guessCompany(ex.text.slice(0, 200), ex.url);
-  const ti = guessTitle(ex.text);
+  const ti = guessTitle(ex.text, ex.title, ex.candidates);
   document.getElementById("company").value = co;
   document.getElementById("title").value = ti;
   document.getElementById("src").textContent = ex.url || ex.title;
@@ -78,13 +78,13 @@ async function readList() {
     });
     const d = await r.json();
     if (r.ok && d.ok) {
-      const n = (d.created || []).length + (d.updated || []).length;
       setStatus(`读取完成：新增 ${(d.created || []).length} 条、更新 ${(d.updated || []).length} 条（共识别 ${d.total} 行）`, true);
     } else setStatus("失败：" + (d.error || r.status), false);
   } catch (e) {
     setStatus("连接失败：确认 Hermes 在 " + cfg.server + " 运行", false);
   }
 }
+
 document.addEventListener("DOMContentLoaded", () => {
   main();
   document.getElementById("record").addEventListener("click", record);

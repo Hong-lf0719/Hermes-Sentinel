@@ -79,11 +79,32 @@ def _pick_apply_url(content_html: str) -> str:
 
 
 def _clean_city(name: str) -> str:
-    """'湖北省武汉市' -> '武汉'，便于与画像里的城市做包含匹配。"""
+    """清理武大源的城市字段。
+
+    - 多城市逗号/顿号/斜杠拼接 -> 拆开逐个清洗再拼回（'武汉,广东省深圳' -> '武汉, 深圳'）
+      保留多城市是因为 city_score 用子串匹配（'武汉' in city），拆开不丢命中，
+      同时修掉之前“拼接城市没拆分”的脏数据。
+    - 剥离省/自治区/市辖区前缀（'湖北省武汉' -> '武汉'）
+    - 剥离市/区/县后缀（'北京海淀区' -> '北京'、'石家庄市' -> '石家庄'）
+    """
     if not name:
         return ""
-    s = re.sub(r"^.*?省|^.*?自治区|市辖区", "", name)
-    return s.replace("市", "").strip() or name
+    parts = re.split(r"[,，、/\s]+", name.strip())
+    out, seen = [], set()
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        # 剥离前缀：省 / 自治区 / 市辖区
+        p = re.sub(r"^.*?(省|自治区|市辖区)", "", p)
+        # 剥离后缀：市 / 区 / 县（含“北京海淀区”类 市+区 嵌套）
+        p = re.sub(r"(市|.{1,4}(区|县))$", "", p).strip()
+        if not p:
+            continue
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return ", ".join(out) if out else name
 
 
 class WhuJobsSource(SourceAdapter):

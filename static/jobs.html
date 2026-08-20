@@ -23,6 +23,12 @@
   .btn-set{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
   .btn-set.on{background:var(--acc);color:#04293a;border-color:var(--acc)}
   .btn-refresh{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+  .btn-more{background:var(--card2);color:var(--sub);border:1px solid var(--line)}
+  .btn-more.on{color:var(--acc);border-color:var(--acc)}
+  .more{display:flex;gap:8px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--line)}
+  .more select,.more input{padding:7px 9px;background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:8px;font-size:13px}
+  .more input[type=text]{min-width:90px}
+  .focus-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
   .list{padding:12px 16px;display:grid;gap:12px}
   /* 投递进度看板：自动汇总 + 一键筛选 */
   .dash{background:rgba(15,23,42,.94);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:10px 16px}
@@ -66,10 +72,31 @@
   .apply.lk-official{background:#22c55e;color:#052e16}
   .apply.lk-detail{background:#38bdf8;color:#052030}
   .apply.lk-search{background:#475569;color:#e2e8f0}
-  /* 匹配分档：高分醒目 */
+  /* 匹配分档：高分醒目（阈值同后端 score_tier：75/60/45） */
   .score.s-hi{background:#14532d;color:#4ade80}
-  .score.s-mid{background:#3f3f0a;color:#fde047}
+  .score.s-mid{background:#0c4a6e;color:#7dd3fc}
+  .score.s-ok{background:#3f3f0a;color:#fde047}
   .score.s-low{background:var(--card2);color:var(--sub)}
+  /* 分档标签 */
+  .tier{font-style:normal;font-size:11px;padding:2px 7px;border-radius:20px;margin-left:6px;vertical-align:middle;font-weight:600}
+  .tier.t-hi{background:#14532d;color:#4ade80}
+  .tier.t-mid{background:#0c4a6e;color:#7dd3fc}
+  .tier.t-low{background:#3f3f0a;color:#fde047}
+  .tier.t-obs{background:var(--card2);color:var(--sub)}
+  /* 截止日紧急度 */
+  .meta .dl-urgent{background:#7f1d1d!important;color:#fca5a5;font-weight:700;padding:3px 7px;border-radius:6px}
+  .meta .dl-dead{background:var(--card2)!important;color:#64748b;text-decoration:line-through;padding:3px 7px;border-radius:6px}
+  /* 企业性质标签：央企/国企=金红系 外企=蓝 民企=灰 事业单位=紫 */
+  .ent{font-style:normal;font-size:11px;padding:2px 7px;border-radius:20px;margin-left:6px;vertical-align:middle;font-weight:700}
+  .ent-央企{background:#7f1d1d;color:#fca5a5}
+  .ent-国企{background:#78350f;color:#fcd34d}
+  .ent-事业单位{background:#4c1d95;color:#c4b5fd}
+  .ent-外企{background:#0c4a6e;color:#7dd3fc}
+  .ent-民企{background:var(--card2);color:var(--sub)}
+  .ent-其他{background:var(--card2);color:#94a3b8}
+  /* 笔试标注：免笔试=亮绿醒目 有笔试=灰 */
+  .exam-free{font-style:normal;font-size:11px;padding:2px 7px;border-radius:20px;margin-left:6px;vertical-align:middle;font-weight:700;background:#14532d;color:#4ade80}
+  .exam-yes{font-style:normal;font-size:11px;padding:2px 7px;border-radius:20px;margin-left:6px;vertical-align:middle;font-weight:600;background:var(--card2);color:#94a3b8}
   .empty{text-align:center;color:var(--sub);padding:40px 20px;line-height:1.7}
   /* 设置弹窗 */
   .mask{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
@@ -86,8 +113,34 @@
   .modal .foot button{flex:1}
   .btn-save{background:var(--acc);color:#04293a}
   .btn-cancel{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+  .prof-note{font-size:12px;color:var(--sub);background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:14px;line-height:1.55}
+  .prof-note b{color:var(--acc)}
+  .group{margin-bottom:14px}
+  .group>label{display:block;font-size:12px;color:var(--sub);margin-bottom:6px}
+  .group .desc{font-size:11px;color:var(--sub);margin-top:4px}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;max-height:150px;overflow:auto;padding:2px}
+  .chip{background:var(--card2);border:1px solid var(--line);color:var(--sub);padding:6px 10px;border-radius:16px;font-size:12px;cursor:pointer;transition:.15s;font-family:inherit}
+  .chip:hover{border-color:var(--acc)}
+  .chip.on{background:var(--acc);color:#04293a;border-color:var(--acc);font-weight:600}
+  .chip.sug{background:#06304a;border-color:var(--acc);color:var(--acc)}
+  .chip.sug:hover{background:var(--acc);color:#04293a}
+  .kw{width:100%;box-sizing:border-box;background:var(--card2);border:1px solid var(--line);color:var(--txt);
+      padding:8px 10px;border-radius:8px;font-size:13px;margin-bottom:6px;font-family:inherit}
+  .kw:focus{outline:none;border-color:var(--acc)}
+  .chips.sug{min-height:0;max-height:90px}
+  .prof-hr{border:none;border-top:1px dashed var(--line);margin:14px 0}
   .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#04293a;color:#7dd3fc;padding:9px 16px;border-radius:20px;font-size:13px;opacity:0;transition:.3s;z-index:30;border:1px solid var(--acc)}
   .toast.on{opacity:1}
+  /* 聚焦开关激活态（.btn-set.on 已存在）；隐藏恢复条 */
+  .hidden-bar{display:flex;align-items:center;gap:10px;background:#1a1208;border:1px solid #b45309;border-radius:10px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:#fcd34d}
+  .hidden-bar .link-btn{background:none;border:none;color:#7dd3fc;cursor:pointer;font-size:13px;text-decoration:underline;font-family:inherit}
+  /* 卡片：外地 / 三不中 标识 + 补全建议 + 标记不投 */
+  .tag-out{font-style:normal;font-size:11px;padding:1px 7px;border-radius:12px;margin-left:6px;background:var(--card2);color:var(--sub);border:1px solid var(--line);vertical-align:middle}
+  .tag-tri{font-style:normal;font-size:11px;padding:1px 7px;border-radius:12px;margin-left:6px;background:#3f1d1d;color:#fca5a5;border:1px solid #7f1d1d;vertical-align:middle;font-weight:600}
+  .suggest{background:#0c2a3a;border:1px solid var(--acc);border-radius:8px;padding:7px 10px;margin-top:8px;font-size:12px;color:#7dd3fc}
+  .mini-btn{background:var(--card2);border:1px solid var(--acc);color:var(--acc);border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;font-family:inherit;margin-left:8px}
+  .mini-btn:hover{background:var(--acc);color:#04293a}
+  .hide-btn{margin-left:8px}
 </style>
 </head>
 <body>
@@ -97,14 +150,41 @@
 </header>
 
 <div class="bar">
-  <select id="f-batch"><option value="">全部批次</option><option>提前批</option><option>秋招</option><option>春招</option><option>补录</option><option>实习</option><option>其他</option></select>
-  <select id="f-status"><option value="">全部状态</option><option>新</option><option>已看</option><option>已投</option><option>笔试</option><option>面试</option><option>挂</option><option>OC</option></select>
-  <input id="f-city" type="text" placeholder="城市筛选" />
-  <input id="f-score" type="number" placeholder="最低分" style="width:78px" />
+  <select id="f-tier" onchange="loadJobs()">
+    <option value="">全部分档</option>
+    <option value="值得投+" selected>✅ 值得投+ (≥60)</option>
+    <option value="优先投">🔥 优先投 (75+)</option>
+    <option value="值得投">✅ 值得投 (60-74)</option>
+    <option value="备选">🟡 备选 (45-59)</option>
+    <option value="观察">⚪ 观察 (&lt;45)</option>
+  </select>
+  <select id="f-sort" onchange="loadJobs()">
+    <option value="score">按匹配分</option>
+    <option value="deadline">按截止日（最急优先）</option>
+    <option value="new">按最新发现</option>
+  </select>
+  <select id="f-source" onchange="loadJobs()"><option value="">全部来源</option></select>
+  <button class="btn-set" id="f-urgent" onclick="toggleUrgent()">⏰ 7天内截止</button>
   <button class="btn-refresh" onclick="loadJobs()">刷新</button>
   <button class="btn-scan" onclick="scan()">扫岗位</button>
-  <button class="btn-set" id="f-real" onclick="toggleReal()">✓ 只看真实投递</button>
   <button class="btn-set" onclick="openSet()">⚙ 画像</button>
+  <button class="btn-more" id="f-more" onclick="toggleMore()">更多筛选 ▾</button>
+</div>
+
+<div class="more" id="morePanel" style="display:none">
+  <select id="f-batch" onchange="loadJobs()"><option value="">全部批次</option><option>提前批</option><option>秋招</option><option>春招</option><option>补录</option><option>实习</option><option>其他</option></select>
+  <select id="f-status" onchange="loadJobs()"><option value="">全部状态</option><option>新</option><option>已看</option><option>已投</option><option>笔试</option><option>面试</option><option>挂</option><option>OC</option></select>
+  <select id="f-ent" onchange="loadJobs()"><option value="">全部性质</option><option>央企</option><option>国企</option><option>外企</option><option>民企</option><option>事业单位</option><option>其他</option></select>
+  <select id="f-exam" onchange="loadJobs()"><option value="">笔试：不限</option><option>免笔试</option><option>有笔试</option></select>
+  <input id="f-city" type="text" placeholder="城市筛选" />
+  <input id="f-score" type="number" placeholder="最低分" style="width:78px" />
+  <button class="btn-set" id="f-real" onclick="toggleReal()">✓ 只看真实投递</button>
+</div>
+
+<div class="hidden-bar" id="hiddenBar" style="display:none">
+  <span id="hiddenTxt"></span>
+  <button class="link-btn" onclick="showHidden()">查看</button>
+  <button class="link-btn" onclick="clearHidden()">全部恢复</button>
 </div>
 
 <div class="dash">
@@ -118,38 +198,65 @@
 <div class="mask" id="mask">
   <div class="modal">
     <h3>⚙ 我的求职画像</h3>
-    <div class="field">
-      <label>目标地区（逗号分隔）</label>
-      <input id="p-regions" placeholder="武汉, 孝感, 湖北, 远程" />
-      <div class="hint">命中其一即收录</div>
+    <div class="prof-note">这张画像决定哨兵 <b>全量收录什么 · 匹配什么 · 给谁加权</b>：方向+地区+单位性质+招聘类型+学历门槛共同决定匹配分与看板聚焦。<br>选项均来自全国岗位真实分布，直接勾选；写关键词还能智能推荐相关方向。<b>所有岗位都入库</b>，地区/学历是看板上的「聚焦开关」，不丢任何机会。</div>
+
+    <div class="group">
+      <label>📍 目标地区（看板「只看目标地区」聚焦用·全量入库不砍）</label>
+      <div class="chips" id="c-regions"></div>
+      <div class="desc">候选项=全国岗位里实际出现的城市（已去重归一）</div>
     </div>
-    <div class="field">
-      <label>方向关键词（逗号分隔）</label>
-      <input id="p-directions" placeholder="AI应用开发, 数据开发, 大模型应用" />
+
+    <div class="group">
+      <label>🧭 求职方向（决定匹配分·可多选）</label>
+      <input id="f-dir-kw" class="kw" placeholder="写关键词智能推荐，如：AI开发 / 大模型 / 数据" oninput="onDirKW()" />
+      <div class="chips sug" id="c-dir-sug"></div>
+      <div class="chips" id="c-directions"></div>
+      <div class="desc">括号=该方向在全国岗位的命中数；也可自己写关键词，系统推荐相关方向</div>
     </div>
-    <div class="field">
-      <label>学历</label>
-      <input id="p-education" placeholder="本科" />
+
+    <div class="group">
+      <label>🎓 专业（选专业自动推荐相关方向）</label>
+      <div class="chips" id="c-major"></div>
     </div>
-    <div class="field">
-      <label>院校要求</label>
-      <input id="p-school" placeholder="双非可投" />
+
+    <div class="group">
+      <label>🏢 招聘类型（校招/社招/实习，空=不限）</label>
+      <div class="chips" id="c-rtype"></div>
     </div>
-    <div class="field">
-      <label>关注批次（逗号分隔）</label>
-      <input id="p-batches" placeholder="提前批, 秋招, 春招, 补录, 实习" />
+
+    <div class="group">
+      <label>🏛 单位性质（勾选=对应岗位匹配分 +4）</label>
+      <div class="chips" id="c-nature"></div>
     </div>
-    <div class="field">
-      <label>薪资下限（0=不限）</label>
+
+    <div class="group">
+      <label>🎓 学历门槛（看板「仅本科可投」聚焦用）</label>
+      <div class="chips" id="c-edu-thr"></div>
+      <div class="desc" id="reach"></div>
+    </div>
+
+    <div class="group">
+      <label>🎓 自身学历层次（参考，不看板过滤）</label>
+      <div class="chips" id="c-education"></div>
+    </div>
+
+    <div class="group">
+      <label>🗓 关注批次（抓取过滤）</label>
+      <div class="chips" id="c-batches"></div>
+    </div>
+
+    <div class="group">
+      <label>💰 薪资下限（0=不限）</label>
       <input id="p-salary" type="number" placeholder="0" />
     </div>
-    <div class="field">
-      <label>排除关键词（逗号分隔）</label>
+    <div class="group">
+      <label>🚫 排除关键词（逗号分隔）</label>
       <input id="p-exclude" placeholder="销售, 土木" />
     </div>
+
     <div class="foot">
       <button class="btn-cancel" onclick="closeSet()">取消</button>
-      <button class="btn-save" onclick="saveSet()">保存</button>
+      <button class="btn-save" onclick="saveSet()">保存并重算</button>
     </div>
   </div>
 </div>
@@ -159,21 +266,51 @@
 <script>
 const STATUSES = ["新","已看","已投","笔试","面试","挂","OC"];
 let onlyReal = false;  // 只看真实投递（状态已推进 或 浏览器扩展主动投的）
+let urgentOnly = false;  // 只看 7 天内截止
+let onlyRegion = false;  // 只看目标地区（看板聚焦开关）
+let eduFilter = false;   // 仅本科可投（看板聚焦开关）
+let includeHiddenOnce = false;  // 临时查看已隐藏岗位
+let MY_REGIONS = [];     // 画像地区（用于卡片「外地」标识 / 三不中判断）
+let MY_EDU = "本科";     // 画像自身学历
 function toast(m){const t=document.getElementById("toast");t.textContent=m;t.classList.add("on");setTimeout(()=>t.classList.remove("on"),1800);}
 function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+// 分档 → 分数区间（与后端 matcher.score_tier 保持一致）
+const TIER_RANGE={"优先投":[75,0],"值得投+":[60,0],"值得投":[60,74],"备选":[45,59],"观察":[0,44]};
+function tierOf(s){s=s||0;return s>=75?"优先投":(s>=60?"值得投":(s>=45?"备选":"观察"));}
 
 async function loadJobs(){
   const b=document.getElementById("f-batch").value;
   const s=document.getElementById("f-status").value;
   const c=document.getElementById("f-city").value.trim();
   const sc=document.getElementById("f-score").value.trim();
+  const tier=document.getElementById("f-tier").value;
+  const sort=document.getElementById("f-sort").value;
+  const src=document.getElementById("f-source").value;
+  const ent=document.getElementById("f-ent").value;
+  const exam=document.getElementById("f-exam").value;
   const q=new URLSearchParams();
-  if(b)q.set("batch",b); if(s)q.set("status",s); if(c)q.set("city",c); if(sc)q.set("min_score",sc);
+  if(b)q.set("batch",b); if(s)q.set("status",s); if(c)q.set("city",c);
+  if(sort)q.set("sort",sort); if(src)q.set("source",src);
+  if(ent)q.set("enterprise_type",ent); if(exam)q.set("exam_free",exam);
+  if(urgentOnly)q.set("urgent_days","7");
+  if(onlyRegion)q.set("only_region","1");
+  if(eduFilter)q.set("edu_filter","1");
+  if(includeHiddenOnce)q.set("include_hidden","1");
+  // 分档与「最低分」并存时取更严的下限，避免互相打架
+  let lo=sc?Number(sc):0, hi=0;
+  if(tier){const [tl,th]=TIER_RANGE[tier]; lo=Math.max(lo,tl); hi=th;}
+  // 根因修复：投递是真实动作，已推进状态的岗位（已投/笔试/面试/OC/挂）
+  // 以及「只看真实投递」时，一律不受匹配分下限过滤——避免低分已投被藏起来
+  const DELIV_STATES=["已投","笔试","面试","OC","挂"];
+  if(DELIV_STATES.indexOf(s)>=0 || onlyReal) lo=0;
+  if(lo)q.set("min_score",lo); if(hi)q.set("max_score",hi);
   const r=await fetch("/api/jobs?"+q.toString());
   const d=await r.json();
+  includeHiddenOnce=false;
   if(onlyReal) d.jobs=d.jobs.filter(j=>j.status!=='新'||(j.source||'').indexOf('浏览器扩展')>=0);
   const list=document.getElementById("list");
-  if(!d.jobs.length){list.innerHTML='<div class="empty">暂无匹配岗位。<br>点「扫岗位」触发哨兵扫描，或在「⚙ 画像」调整条件。</div>';loadStats();return;}
+  if(!d.jobs.length){list.innerHTML='<div class="empty">暂无匹配岗位。<br>点「扫岗位」触发哨兵扫描，或放宽分档 / 在「⚙ 画像」调整条件。</div>';loadStats();return;}
   list.innerHTML=d.jobs.map(cardHTML).join("");
   loadStats();
 }
@@ -183,32 +320,54 @@ const LINK_UI={
   "源详情页"  :{txt:"查看详情 ↗",  cls:"lk-detail"},
   "搜索直达"  :{txt:"搜索入口 ↗",  cls:"lk-search"},
 };
+const TIER_UI={"优先投":{cls:"t-hi",ico:"🔥"},"值得投":{cls:"t-mid",ico:"✅"},"备选":{cls:"t-low",ico:"🟡"},"观察":{cls:"t-obs",ico:"⚪"}};
 function cardHTML(j){
   const score=j.match_score||0;
-  const scls=score>=80?"s-hi":(score>=50?"s-mid":"s-low");
+  const tier=tierOf(score);
+  const tu=TIER_UI[tier];
+  const scls=score>=75?"s-hi":(score>=60?"s-mid":(score>=45?"s-ok":"s-low"));
   const lu=LINK_UI[j.link_type]||{txt:"打开 ↗",cls:""};
   const link=j.url
     ? `<a class="apply ${lu.cls}" href="${esc(j.url)}" target="_blank" rel="noopener">${lu.txt}</a>`
     : `<span class="apply nolink">无链接</span>`;
   const sg=STATUSES.map(st=>`<button class="${st===j.status?'on':''}" onclick="setStatus('${j.raw_hash}','${st}',this)">${st}</button>`).join("");
+  // 截止日紧急度：打分理由里已带「⚠N天内截止/已过期」，这里给 meta 上色强化
+  const reason=j.match_reason||"";
+  const dlCls=reason.indexOf("已过期")>=0?"dl-dead":(reason.indexOf("⚠")>=0?"dl-urgent":"");
+  // 外地标识：看了目标地区仍出现、且城市不在画像地区内
+  const city=j.city||"";
+  const isOut = MY_REGIONS.length>0 && city && !MY_REGIONS.some(r=>r===city||city.indexOf(r)>=0||r.indexOf(city)>=0);
+  // 三不中：地区不符 + 方向没中(理由无"方向:") + 学历门槛够不着(需硕士但自身本科)
+  const dirHit = reason.indexOf("方向:")>=0;
+  const eduMiss = MY_EDU==="本科" && (j.education||"").indexOf("硕士")>=0;
+  const triMiss = isOut && !dirHit && eduMiss;
   const meta=[
     j.city&&`📍 ${esc(j.city)}`,
     j.education&&`🎓 ${esc(j.education)}`,
-    j.deadline&&`⏰ ${esc(j.deadline)}`,
-    j.nature&&`🏢 ${esc(j.nature)}`,
+    j.deadline&&`<span class="${dlCls}">⏰ ${esc(j.deadline)}</span>`,
+    j.salary&&`💰 ${esc(j.salary)}`,
     j.industry&&`🔧 ${esc(j.industry)}`,
     j.source&&`📡 ${esc(j.source)}`,
-  ].filter(Boolean).map(x=>`<span>${x}</span>`).join("");
+  ].filter(Boolean).map(x=>x.indexOf("<span")===0?x:`<span>${x}</span>`).join("");
+  const outTag = isOut?`<em class="tag-out">外地</em>`:"";
+  const triTag = triMiss?`<em class="tag-tri" title="地区不符·方向不中·学历够不着，建议确认后标记不投">⚠ 三不中</em>`:"";
+  const entTag = j.enterprise_type?`<em class="ent ent-${esc(j.enterprise_type)}">🏛 ${esc(j.enterprise_type)}</em>`:"";
+  const examTag = j.exam_free==="免笔试"?`<em class="exam-free">⚡ 免笔试</em>`:(j.exam_free==="有笔试"?`<em class="exam-yes">📝 有笔试</em>`:"");
+  const sug=j.suggest?`<div class="suggest">💡 建议方向补全：${esc((j.suggest.industry||"")+" "+ (j.suggest.major||""))}<button class="mini-btn" onclick="adoptSuggest('${j.raw_hash}',this)">采用</button></div>`:"";
   return `<div class="card" data-hash="${j.raw_hash}">
     <div class="ctop">
       <div class="score ${scls}">${score}</div>
-      <div class="cmain"><div class="company">${esc(j.company)}</div><div class="title">${esc(j.title)}</div></div>
+      <div class="cmain">
+        <div class="company">${esc(j.company)} <em class="tier ${tu.cls}">${tu.ico} ${tier}</em>${entTag}${examTag}${outTag}${triTag}</div>
+        <div class="title">${esc(j.title)}</div>
+      </div>
       <div class="batch">${esc(j.batch||"其他")}</div>
     </div>
     <div class="meta">${meta}</div>
     ${j.match_reason?`<div class="reason">💡 ${esc(j.match_reason)}</div>`:""}
+    ${sug}
     ${j.jd_text?`<div class="jd"><button class="jd-btn" onclick="toggleJD(this)">📋 查看岗位 JD（自动补全）</button><div class="jd-body" style="display:none">${esc(j.jd_text)}</div></div>`:""}
-    <div class="actions"><div class="sg">${sg}</div>${link}</div>
+    <div class="actions"><div class="sg">${sg}</div>${link}<button class="mini-btn hide-btn" onclick="hideJob('${j.raw_hash}',this)">标记不投</button></div>
   </div>`;
 }
 async function setStatus(hash,status,btn){
@@ -225,44 +384,296 @@ function toggleJD(btn){
   btn.textContent=open?'📋 查看岗位 JD（自动补全）':'📋 收起 JD';
 }
 let AUTH_TOKEN='__WEB_TOKEN__';
+let scanning=false;
 async function scan(){
-  toast("哨兵扫描中…");
+  if(scanning) return;
+  scanning=true;
+  const btn=document.querySelector(".btn-scan");
+  const old=btn.textContent;
+  btn.textContent="扫描中…(约2分钟)"; btn.disabled=true;
+  toast("哨兵扫描中，请稍候（重抓国聘全国岗）…");
   try{
-    await fetch("/chat",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+AUTH_TOKEN},body:JSON.stringify({message:"扫岗位",session_id:"sentinel"})});
-  }catch(e){}
+    const r=await fetch("/api/scan",{method:"POST",headers:{"Authorization":"Bearer "+AUTH_TOKEN}});
+    const d=await r.json();
+    if(d.ok){
+      toast(`扫描完成：采集 ${d.collected} 条，入库 ${d.kept} 条（新增 ${d.new}）`);
+    } else {
+      toast("扫描失败："+(d.error||"未知错误"));
+    }
+  }catch(e){
+    toast("扫描请求出错，请重试");
+  }
+  btn.textContent=old; btn.disabled=false; scanning=false;
   await loadJobs();
-  toast("扫描完成，已刷新");
+  loadStats();
 }
 
-/* 画像设置 */
+/* 重算分数：改了画像或升级打分规则后秒级重排，不重抓外部站 */
+let rescoring=false;
+async function rescore(){
+  if(rescoring) return;
+  rescoring=true;
+  toast("重算匹配分中…");
+  try{
+    const r=await fetch("/api/jobs/rescore",{method:"POST",headers:{"Authorization":"Bearer "+AUTH_TOKEN}});
+    const d=await r.json();
+    if(d.ok) toast(`已重算 ${d.total} 条，其中 ${d.changed} 条分数变化`);
+    else toast("重算失败："+(d.error||"未知错误"));
+  }catch(e){ toast("重算请求出错"); }
+  rescoring=false;
+  await loadJobs();
+}
+
+function toggleUrgent(){
+  urgentOnly=!urgentOnly;
+  document.getElementById("f-urgent").classList.toggle("on",urgentOnly);
+  loadJobs();
+}
+
+/* 加载画像的地区/学历，供卡片「外地」与「三不中」标识 */
+async function loadProfileLite(){
+  try{
+    const p=await (await fetch("/api/profile")).json();
+    MY_REGIONS = p.regions||[];
+    MY_EDU = p.education||"本科";
+  }catch(e){}
+}
+
+function toggleRegion(){
+  onlyRegion=!onlyRegion;
+  document.getElementById("f-region").classList.toggle("on",onlyRegion);
+  loadJobs();
+}
+function toggleEdu(){
+  eduFilter=!eduFilter;
+  document.getElementById("f-edu").classList.toggle("on",eduFilter);
+  loadJobs();
+}
+
+/* 采纳补全建议：写回行业/专业并立即重算该岗 */
+async function adoptSuggest(hash,btn){
+  const card=btn.closest(".card");
+  const sug={};
+  const txt=card.querySelector(".suggest").textContent||"";
+  // 从「建议方向补全：行业X 专业Y」粗取（后端只补空字段，安全）
+  const m=txt.match(/行业([^ ]+)\s*专业(.+)/);
+  if(m){ sug.industry=m[1].trim(); sug.major=m[2].trim(); }
+  if(!sug.industry && !sug.major){ toast("无可采纳内容"); return; }
+  btn.disabled=true; btn.textContent="采纳中…";
+  try{
+    const r=await fetch("/api/jobs/"+hash+"/adopt",{method:"POST",headers:{"Authorization":"Bearer "+AUTH_TOKEN,"Content-Type":"application/json"},body:JSON.stringify(sug)});
+    const d=await r.json();
+    if(d.ok){ toast("已采纳补全，分数已更新"); }
+    else toast("采纳失败");
+  }catch(e){ toast("采纳请求出错"); }
+  await loadJobs();
+}
+
+/* 标记不投（隐藏，非删除）；可恢复 */
+async function hideJob(hash,btn){
+  try{
+    const r=await fetch("/api/jobs/"+hash+"/hide",{method:"POST",headers:{"Authorization":"Bearer "+AUTH_TOKEN}});
+    const d=await r.json();
+    if(d.ok){ btn.closest(".card").remove(); loadHiddenCount(); toast("已标记不投，可恢复"); }
+  }catch(e){}
+}
+async function loadHiddenCount(){
+  try{
+    const d=await (await fetch("/api/jobs/hidden_count")).json();
+    const bar=document.getElementById("hiddenBar");
+    if(d.count>0){
+      document.getElementById("hiddenTxt").textContent=`已隐藏 ${d.count} 个岗位（标记不投）`;
+      bar.style.display="flex";
+    }else{
+      bar.style.display="none";
+    }
+  }catch(e){}
+}
+function showHidden(){
+  // 临时显示隐藏岗位（include_hidden），再加载一次
+  includeHiddenOnce=true; loadJobs();
+}
+function clearHidden(){
+  if(!confirm("确定恢复全部已隐藏的岗位？")) return;
+  restoreAll();
+}
+async function restoreAll(){
+  try{
+    const d=await (await fetch("/api/jobs?include_hidden=true&min_score=0")).json();
+    for(const j of d.jobs){
+      await fetch("/api/jobs/"+j.raw_hash+"/unhide",{method:"POST",headers:{"Authorization":"Bearer "+AUTH_TOKEN}});
+    }
+    toast("已恢复全部隐藏岗位");
+    loadHiddenCount();
+    await loadJobs();
+  }catch(e){}
+}
+
+/* 画像设置 —— 数据驱动多选（选项来自 /api/profile/options） */
+let PROF={}, OPTS={};
+const EDU_RANK={"大专":1,"本科":2,"硕士":3,"博士":4};
 async function openSet(){
   try{
-    const r=await fetch("/api/profile"); const p=await r.json();
-    document.getElementById("p-regions").value=(p.regions||[]).join(", ");
-    document.getElementById("p-directions").value=(p.directions||[]).join(", ");
-    document.getElementById("p-education").value=p.education||"";
-    document.getElementById("p-school").value=p.school_level||"";
-    document.getElementById("p-batches").value=(p.batches||[]).join(", ");
-    document.getElementById("p-salary").value=p.salary_min||0;
-    document.getElementById("p-exclude").value=(p.exclude_keywords||[]).join(", ");
+    const [pr,op]=await Promise.all([
+      fetch("/api/profile").then(r=>r.json()),
+      fetch("/api/profile/options").then(r=>r.json()),
+    ]);
+    PROF=pr||{}; OPTS=op||{};
+    if(!PROF.regions)PROF.regions=[];
+    if(!PROF.directions)PROF.directions=[];
+    if(!PROF.major)PROF.major=[];
+    if(!PROF.recruit_type)PROF.recruit_type=[];
+    if(!PROF.nature)PROF.nature=[];
+    if(!PROF.batches)PROF.batches=[];
+    if(!PROF.edu_threshold)PROF.edu_threshold="不限";
+    if(!PROF.education)PROF.education="本科";
+    renderChips("c-regions","regions",OPTS.cities||[],true);
+    renderChips("c-directions","directions",OPTS.directions||[],true);
+    renderChips("c-major","major",OPTS.majors||[],true);
+    renderChips("c-rtype","recruit_type",OPTS.recruit_types||[],true);
+    renderChips("c-nature","nature",OPTS.natures||[],true);
+    renderEduThr();
+    renderChips("c-education","education",OPTS.educations||[],false);
+    renderChips("c-batches","batches",OPTS.batches||[],true);
+    document.getElementById("p-salary").value=PROF.salary_min||0;
+    document.getElementById("p-exclude").value=(PROF.exclude_keywords||[]).join(", ");
+    document.getElementById("c-dir-sug").innerHTML="";
+    document.getElementById("f-dir-kw").value="";
+    updateReach();
   }catch(e){}
   document.getElementById("mask").classList.add("on");
+}
+function renderChips(id,key,opts,multi){
+  const box=document.getElementById(id); box.innerHTML="";
+  (opts||[]).forEach(o=>{
+    const val = Array.isArray(o)?o[0]:o;
+    const cnt = Array.isArray(o)?o[1]:null;
+    const b=document.createElement("button");
+    b.type="button"; b.className="chip";
+    b.textContent = cnt!=null ? `${val} (${cnt})` : val;
+    b.dataset.val=val;
+    const cur=PROF[key];
+    const on = multi ? (Array.isArray(cur)&&cur.includes(val)) : (cur===val);
+    if(on) b.classList.add("on");
+    b.onclick=()=>{
+      if(multi){
+        if(!Array.isArray(PROF[key])) PROF[key]=[];
+        const i=PROF[key].indexOf(val);
+        if(i>=0){PROF[key].splice(i,1);b.classList.remove("on");}
+        else{PROF[key].push(val);b.classList.add("on");}
+        if(key==="major") onMajorPick();   // 选专业 → 推荐相关方向
+      }else{
+        box.querySelectorAll(".chip").forEach(x=>x.classList.remove("on"));
+        if(PROF[key]===val){PROF[key]="";b.classList.remove("on");}
+        else{PROF[key]=val;b.classList.add("on");}
+        if(key==="edu_threshold"||key==="education") updateReach();
+      }
+    };
+    box.appendChild(b);
+  });
+}
+/* 学历门槛：单选，选项带可达机会描述（OPTS.edu_thresholds = [{val,desc}]） */
+function renderEduThr(){
+  const box=document.getElementById("c-edu-thr"); box.innerHTML="";
+  (OPTS.edu_thresholds||[]).forEach(o=>{
+    const b=document.createElement("button");
+    b.type="button"; b.className="chip"; b.dataset.val=o.val;
+    b.textContent=o.val + (o.desc?`（${o.desc}）`:"");
+    if(PROF.edu_threshold===o.val) b.classList.add("on");
+    b.onclick=()=>{
+      box.querySelectorAll(".chip").forEach(x=>x.classList.remove("on"));
+      if(PROF.edu_threshold===o.val){PROF.edu_threshold="不限";b.classList.remove("on");}
+      else{PROF.edu_threshold=o.val;b.classList.add("on");}
+      updateReach();
+    };
+    box.appendChild(b);
+  });
+}
+/* 写关键词 → 智能推荐相关方向（追加到方向勾选区） */
+let dirKWtimer=null;
+function onDirKW(){
+  clearTimeout(dirKWtimer);
+  dirKWtimer=setTimeout(async ()=>{
+    const kw=document.getElementById("f-dir-kw").value.trim();
+    const box=document.getElementById("c-dir-sug");
+    if(!kw){box.innerHTML="";return;}
+    try{
+      const r=await fetch("/api/profile/suggest?kw="+encodeURIComponent(kw));
+      const d=await r.json();
+      const dirs=d.directions||[];
+      box.innerHTML="";
+      dirs.forEach(name=>{
+        if((PROF.directions||[]).includes(name))return;
+        const b=document.createElement("button");
+        b.type="button"; b.className="chip sug";
+        b.textContent="+ "+name;
+        b.onclick=()=>{ addDir(name); b.remove(); };
+        box.appendChild(b);
+      });
+      if(!dirs.length) box.innerHTML='<span class="desc">无匹配方向，可手动在下方勾选</span>';
+    }catch(e){}
+  },250);
+}
+function addDir(name){
+  if(!Array.isArray(PROF.directions))PROF.directions=[];
+  if(PROF.directions.includes(name))return;
+  PROF.directions.push(name);
+  document.querySelectorAll("#c-directions .chip").forEach(c=>{
+    if(c.dataset.val===name)c.classList.add("on");
+  });
+}
+/* 选专业 → 推荐相关方向（复用 suggest 接口） */
+async function onMajorPick(){
+  const majors=PROF.major||[];
+  if(!majors.length)return;
+  try{
+    const r=await fetch("/api/profile/suggest?kw="+encodeURIComponent(majors[majors.length-1]));
+    const d=await r.json();
+    (d.directions||[]).forEach(addDir);
+  }catch(e){}
+}
+/* 学历门槛 × 可达机会（按 education 文本估算；985/211 数据源暂无） */
+function updateReach(){
+  const bd=OPTS.edu_breakdown||{};
+  const total=Object.values(bd).reduce((a,b)=>a+b,0)||0;
+  const myEdu=PROF.education||"本科";
+  const rankOf={"大专":1,"本科":2,"硕士及以上":3,"其他":2};
+  const myRank=rankOf[myEdu]||2;
+  let reach=0;
+  for(const [k,v] of Object.entries(bd)){
+    if((rankOf[k]||2)<=myRank) reach+=v;
+  }
+  const thr=PROF.edu_threshold||"不限";
+  const el=document.getElementById("reach");
+  // 学历门槛按 education 文本推断可达性（实测 95% 本科可投；985/211 数据源暂无）
+  let line = `本科视角可投 <b>${reach}</b> / 共 ${total} 个岗位（按现有学历标注估算）`;
+  if(thr==="本科可投") line += `；勾选「仅本科可投」后将隐藏 <b>${bd["硕士及以上"]||0}</b> 个需硕士岗`;
+  if(thr==="需硕士") line += `；勾选「仅硕士」后只看 <b>${bd["硕士及以上"]||0}</b> 个岗位`;
+  el.innerHTML = line + `。<br><span class="desc">注：岗位库无 985/211 细分标注，院校维度按学历层次估算，更具真实区分度</span>`;
 }
 function closeSet(){document.getElementById("mask").classList.remove("on");}
 function splitCSV(s){return (s||"").split(/[,，]/).map(x=>x.trim()).filter(Boolean);}
 async function saveSet(){
+  let edu=PROF.education||"本科";
+  if(edu.indexOf("硕士")>=0)edu="硕士";
+  else if(edu.indexOf("博士")>=0)edu="博士";
+  else if(edu.indexOf("大专")>=0||edu.indexOf("专科")>=0)edu="大专";
+  else edu="本科";
   const p={
-    regions:splitCSV(document.getElementById("p-regions").value),
-    directions:splitCSV(document.getElementById("p-directions").value),
-    education:document.getElementById("p-education").value.trim(),
-    school_level:document.getElementById("p-school").value.trim(),
-    batches:splitCSV(document.getElementById("p-batches").value),
+    regions:PROF.regions||[],
+    directions:PROF.directions||[],
+    major:PROF.major||[],
+    recruit_type:PROF.recruit_type||[],
+    nature:PROF.nature||[],
+    edu_threshold:PROF.edu_threshold||"不限",
+    education:edu,
+    batches:PROF.batches||[],
     salary_min:Number(document.getElementById("p-salary").value||0),
     exclude_keywords:splitCSV(document.getElementById("p-exclude").value),
   };
   await fetch("/api/profile",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(p)});
-  closeSet(); toast("画像已保存");
-  await loadJobs();
+  closeSet(); toast("画像已保存，重算中…");
+  await rescore(); await loadJobs();
 }
 
 /* 投递进度看板：从数据库自动汇总各状态数量（每次标记/刷新都重算），点胶囊即按状态筛选 */
@@ -281,8 +692,21 @@ async function loadStats(){
       document.querySelectorAll("#caps .cap").forEach(c=>{ if(c.textContent.indexOf(active)>=0) c.classList.add("on"); });
     }
     const ongoing=(cnt["笔试"]||0)+(cnt["面试"]||0)+(cnt["OC"]||0);
+    // 分档汇总：一眼知道有多少值得优先投
+    const tc={};
+    d.jobs.forEach(j=>{const t=tierOf(j.match_score); tc[t]=(tc[t]||0)+1;});
     document.getElementById("dash-sum").textContent=
-      `共 ${d.count} 岗 · 已投 ${cnt["已投"]||0} · 进行中 ${ongoing} · 挂 ${cnt["挂"]||0}`;
+      `共 ${d.count} 岗 · 🔥优先投 ${tc["优先投"]||0} · ✅值得投 ${tc["值得投"]||0}`
+      + ` · 已投 ${cnt["已投"]||0} · 进行中 ${ongoing} · 挂 ${cnt["挂"]||0}`;
+    // 来源下拉自动填充（只填一次，保留用户当前选择）
+    const sel=document.getElementById("f-source");
+    if(sel.options.length<=1){
+      const srcCnt={};
+      d.jobs.forEach(j=>{const s=j.source||"未知"; srcCnt[s]=(srcCnt[s]||0)+1;});
+      Object.entries(srcCnt).sort((a,b)=>b[1]-a[1]).forEach(([s,n])=>{
+        const o=document.createElement("option"); o.value=s; o.textContent=`${s} (${n})`; sel.appendChild(o);
+      });
+    }
   }catch(e){}
 }
 function filterStatus(st){
@@ -296,6 +720,8 @@ function toggleReal(){
   loadJobs();
 }
 loadJobs();
+loadProfileLite();
+loadHiddenCount();
 </script>
 </body>
 </html>

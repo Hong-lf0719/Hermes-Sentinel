@@ -25,7 +25,36 @@ COL_MAP = {
     "招聘类型": "batch", "招聘对象": "grade",
     "工作地点": "city", "岗位": "title",
     "投递截止": "deadline", "相关链接": "url", "招聘公告": "url",
+    "笔试情况": "exam",
 }
+
+
+def _map_nature(raw: str) -> str:
+    """givemeoc「公司类型」→ 归一化企业性质。"""
+    s = (raw or "").strip()
+    if "央" in s:
+        return "央企" if "央企" in s else "国企"
+    if any(k in s for k in ["国企", "国有"]) or "银行" in s:
+        return "国企"
+    if "事业" in s:
+        return "事业单位"
+    if any(k in s for k in ["外", "合资", "独资"]):
+        return "外企"
+    if any(k in s for k in ["民营", "民企", "私企"]):
+        return "民企"
+    return s or ""
+
+
+def _map_exam(raw: str) -> str:
+    """givemeoc「笔试情况」列 → 三态标注（会员可见=未知不标）。"""
+    s = (raw or "").strip()
+    if not s or s in ("会员可见", "内部校验", "登录后可见", "-"):
+        return ""
+    if any(k in s for k in ("免", "无需", "无笔试", "不设")):
+        return "免笔试"
+    if "笔试" in s:
+        return "有笔试"
+    return ""
 
 
 class GivemeocSource(SourceAdapter):
@@ -77,6 +106,7 @@ class GivemeocSource(SourceAdapter):
                 if city in ("登录后可见", "会员可见", "未知", ""):
                     city = ""
                 title = get("title") or (f"{get('batch')}·{get('industry')}" if get("batch") or get("industry") else "校招岗位")
+                nat = _map_nature(get("nature"))
                 jobs.append(Job(
                     company=company,
                     title=title,
@@ -87,7 +117,9 @@ class GivemeocSource(SourceAdapter):
                     url=url,
                     source=self.name,
                     nature=get("nature"),
+                    enterprise_type=nat,
                     industry=get("industry"),
+                    exam_free=_map_exam(get("exam")),
                 ))
         except Exception:
             return []

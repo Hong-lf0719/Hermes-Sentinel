@@ -54,8 +54,14 @@ def _norm(s: str) -> str:
 
 
 def recognize_batch(text: str) -> str:
-    """从文本识别招聘批次。"""
+    """从文本识别招聘批次。
+
+    "社招"是显式排除项（应届生不投社招）：识别出来后不在画像 batches 枚举里，
+    会被 hard_filter 拦截——判断优先级最高，避免"社会招聘"被兜底成"其他"逃过过滤。
+    """
     t = text or ""
+    if "社招" in t or "社会招聘" in t:
+        return "社招"
     if "提前批" in t:
         return "提前批"
     if "春招" in t:
@@ -97,7 +103,393 @@ def tech_relevance(job: Job) -> int:
     return min(score, 50)
 
 
+# ---------------------------------------------------------------- 方向信号词
+
+# 方向 → 三档信号词。解决「整串子串匹配」的硬伤：
+# 旧实现要求 "数据开发" 四个字原样出现，导致「大数据平台开发工程师」
+# 「数据处理与算法岗」「智能驾驶软件开发」这类最对口的岗位方向分为 0，
+# 实测 473 条里仅 9% 能命中。改为分档语义匹配后覆盖率提升到 70%+。
+DIRECTION_SIGNALS: dict[str, dict[str, tuple[str, ...]]] = {
+    "ai应用开发": {
+        "core": ("ai应用", "大模型应用", "aigc", "llm应用", "智能应用", "ai开发", "ai工程"),
+        "strong": ("大模型", "llm", "人工智能", "机器学习", "深度学习", "算法工程",
+                   "nlp", "自然语言", "计算机视觉", "agent", "智能驾驶", "智能座舱",
+                   "智能算法", "推荐算法", "ai平台"),
+        "weak": ("ai", "智能", "算法", "数字化"),
+    },
+    "大模型应用": {
+        "core": ("大模型", "llm", "aigc", "生成式", "prompt", "agent"),
+        "strong": ("人工智能", "ai应用", "nlp", "自然语言", "深度学习", "多模态"),
+        "weak": ("ai", "智能", "算法"),
+    },
+    "数据开发": {
+        "core": ("数据开发", "大数据开发", "数据工程", "数仓", "数据仓库", "etl",
+                 "数据平台", "数据中台", "大数据平台"),
+        "strong": ("大数据", "数据处理", "数据治理", "spark", "hadoop", "flink",
+                   "hive", "kafka", "数据挖掘", "数据岗", "数据架构", "bi"),
+        "weak": ("数据", "报表", "统计", "数字化"),
+    },
+    "数据分析": {
+        "core": ("数据分析", "商业分析", "bi", "数据运营", "分析师"),
+        "strong": ("数据挖掘", "统计分析", "用户分析", "经营分析", "数据洞察", "报表开发"),
+        "weak": ("数据", "统计", "报表"),
+    },
+    "后端开发": {
+        "core": ("后端", "服务端", "后台开发", "java开发", "golang", "go开发"),
+        "strong": ("软件开发", "微服务", "分布式", "中间件", "服务器", "系统开发",
+                   "平台开发", "web开发", "接口开发", "python开发", "c++开发"),
+        "weak": ("开发", "研发", "编程", "软件"),
+    },
+}
+
+# 城市分层：目标地 > 一线/新一线（大厂与央企总部集中）> 其他
+# 雄安列入一线档——政策新区，央国企总部批量迁入，机会质量接近一线
+TIER_A_CITIES = (
+    "北京", "上海", "广州", "深圳", "杭州", "南京", "成都", "西安", "苏州",
+    "天津", "重庆", "长沙", "合肥", "青岛", "厦门", "宁波", "无锡", "郑州",
+    "济南", "福州", "东莞", "佛山", "大连", "沈阳", "雄安",
+)
+
 _EDU_RANK = {"专科": 1, "大专": 1, "本科": 2, "学士": 2, "硕士": 3, "研究生": 3, "博士": 4}
+
+
+# ---------------------------------------------------------------- 方向类别（用户勾选的 canonical 方向）
+# 把库里 30+ 个零散「岗位角色」归并为 ~9 类，勾选即驱动匹配分。
+DIRECTION_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "AI/大模型/算法": ("大模型", "llm", "aigc", "人工智能", "ai", "机器学习", "深度学习",
+                   "nlp", "自然语言", "计算机视觉", "多模态", "agent", "智能驾驶",
+                   "智能座舱", "智能算法", "推荐算法", "ai平台", "generative"),
+    "软件开发(后端)": ("后端", "服务端", "后台", "java", "golang", "go开发", "c++",
+                    "python开发", "软件研发", "微服务", "分布式", "中间件", "架构师",
+                    "全栈", "系统开发", "平台开发", "web开发", "接口开发", "服务器"),
+    "前端开发": ("前端", "web前端", "大前端", "vue", "react", "小程序"),
+    "数据开发/分析": ("数据开发", "大数据", "数仓", "数据仓库", "etl", "数据工程",
+                   "数据平台", "数据中台", "spark", "hive", "flink", "kafka",
+                   "数据挖掘", "数据分析", "bi", "商业分析", "数据运营", "数据治理", "报表"),
+    "测试/质量": ("测试", "qa", "测开", "质量"),
+    "运维/DevOps": ("运维", "devops", "sre", "it运维"),
+    "嵌入式/硬件": ("嵌入式", "驱动", "单片机", "硬件", "fpga", "数字后端", "电路", "固件", "物联网"),
+    "通信/网络/安全": ("通信", "网络", "5g", "光通信", "网络安全", "信息安全", "数据安全"),
+    "客户端/移动": ("android", "ios", "客户端", "移动开发", "unity"),
+}
+DIRECTION_LABELS = list(DIRECTION_CATEGORIES.keys())
+
+# 单位性质归一：原始 nature 文本 → canonical 标签
+# （解决「国企=国有企业」「民企=民营上市=其他企业含民营」的重复混乱）
+_NATURE_CANON = (
+    ("央企", "央企"), ("国企", "国企"), ("国有", "国企"), ("银行", "国企"),
+    ("民企", "民企"), ("民营", "民企"), ("私营", "民企"),
+    ("外企", "外企"), ("外资", "外企"), ("外商投资", "外企"), ("外商独资", "外企"),
+    ("事业", "事业单位"), ("科研", "事业单位"), ("教育单位", "事业单位"), ("中等、初等教育", "事业单位"),
+    ("上市", "上市公司"), ("民营上市", "上市公司"), ("民营/上市", "上市公司"),
+)
+_NATURE_PRESTIGE = {"央企": 4, "国企": 3, "事业单位": 3, "上市公司": 2, "外企": 2, "民企": 1}
+
+# enterprise_type 单选优先级：央企 > 国企 > 事业单位 > 外企 > 民企
+# （上市公司/机关等无法归入目标类别的统归「其他」；空=未标注）
+_ENT_PRIORITY = ("央企", "国企", "事业单位", "外企", "民企")
+
+
+def canon_natures(raw: str) -> list[str]:
+    out = []
+    for kw, lab in _NATURE_CANON:
+        if kw in (raw or ""):
+            out.append(lab)
+    seen, res = set(), []
+    for x in out:
+        if x not in seen:
+            seen.add(x); res.append(x)
+    return res
+
+
+def canon_enterprise_type(raw: str) -> str:
+    """把单位性质原文归一化为单一 enterprise_type 标签（空=未标注）。
+
+    区别于 canon_natures（可多标签展示）：本函数按优先级取唯一值，
+    用于 jobs 表 enterprise_type 列的持久化与看板筛选。
+    """
+    cans = canon_natures(raw or "")
+    for lab in _ENT_PRIORITY:
+        if lab in cans:
+            return lab
+    return "其他" if cans else ""
+
+
+def recruit_type_of(raw: str) -> str:
+    """从 nature 文本提取招聘类型（校招/实习/见习/社招）。"""
+    r = raw or ""
+    for t in ("校招", "实习", "见习", "社招"):
+        if t in r:
+            return t
+    return ""
+
+
+# 笔试标注：免笔试关键词（命中即免笔试）优先于「有笔试」（文本出现"笔试"字样）
+_EXAM_FREE_KWS = ("免笔试", "免于笔试", "无需笔试", "无笔试", "免除笔试",
+                  "笔试免试", "不设笔试", "免统一笔试", "免专业笔试", "笔试通过即面")
+
+
+def detect_exam_free(text: str) -> str:
+    """从 JD/标题检测笔试标注，三态：免笔试 / 有笔试 / ""(未知)。"""
+    t = (text or "").replace(" ", "").replace("\u3000", "")
+    if not t:
+        return ""
+    if any(k in t for k in _EXAM_FREE_KWS):
+        return "免笔试"
+    if "笔试" in t:
+        return "有笔试"
+    return ""
+
+
+# 专业归一 + 专业→方向推荐
+MAJOR_CATEGORIES = {
+    "计算机类": ("计算机", "软件", "计科"),
+    "软件工程": ("软件", "软工"),
+    "电子信息": ("电子", "信息", "光电", "集成"),
+    "通信": ("通信", "网络"),
+    "自动化": ("自动化", "控制", "电气"),
+    "数据科学/人工智能": ("数据", "人工智能", "智能", "算法"),
+}
+MAJOR_TO_DIRS = {
+    "计算机类": ["AI/大模型/算法", "软件开发(后端)", "前端开发", "数据开发/分析"],
+    "软件工程": ["软件开发(后端)", "前端开发", "数据开发/分析"],
+    "电子信息": ["嵌入式/硬件", "通信/网络/安全", "AI/大模型/算法"],
+    "通信": ["通信/网络/安全", "嵌入式/硬件"],
+    "自动化": ["嵌入式/硬件", "通信/网络/安全"],
+    "数据科学/人工智能": ["AI/大模型/算法", "数据开发/分析"],
+    "不限": DIRECTION_LABELS,
+}
+
+
+def canon_major(raw: str) -> str:
+    r = (raw or "").replace(" ", "")
+    if not r or "不限" in r or "详见" in r or "未知" in r:
+        return "不限"
+    for cat, kws in MAJOR_CATEGORIES.items():
+        if cat == "不限":
+            continue
+        if any(k in r for k in kws):
+            return cat
+    return "其他"
+
+
+def suggest_directions(kw: str) -> list[str]:
+    """关键词/专业 → 推荐相关方向类别。供前端「写AI开发→推荐相关方向」使用。"""
+    k = _norm(kw)
+    if not k:
+        return []
+    for cat, kws in MAJOR_CATEGORIES.items():           # 专业名直接映射
+        if cat != "不限" and (cat in k or k in cat or any(w in k for w in kws)):
+            return MAJOR_TO_DIRS.get(cat, [])
+    direct = [d for d in DIRECTION_LABELS if d in kw]   # 方向类别名命中
+    if direct:
+        return direct
+    return [d for d, kws in DIRECTION_CATEGORIES.items() if any(w in k for w in kws)]
+
+
+# 标题关键词 → 行业/专业 启发式补全（仅当字段为空时推荐，采纳才落库）
+# 顺序重要：具体岗位规则在前，通用兜底（开发/工程师）在后，避免误判。
+_SUGGEST_RULES: list[tuple[tuple[str, ...], dict[str, str]]] = [
+    (("大模型", "llm", "aigc", "生成式", "prompt", "agent", "多模态"),
+     {"industry": "人工智能/大模型", "major": "数据科学/人工智能"}),
+    (("算法", "机器学习", "深度学习", "nlp", "自然语言", "计算机视觉", "cv", "智能算法", "推荐算法", "强化学习"),
+     {"industry": "算法", "major": "数据科学/人工智能"}),
+    (("数据开发", "大数据", "数仓", "etl", "数据工程", "数据平台", "数据中台", "数据治理",
+      "数据库", "数据采集", "爬虫", "实时数仓", "olap", "clickhouse", "doris", "spark", "hive", "flink", "kafka"),
+     {"industry": "数据开发", "major": "数据科学/人工智能"}),
+    (("数据分析", "商业分析", "数据运营", "bi", "数据挖掘", "报表", "经营分析"),
+     {"industry": "数据分析", "major": "数据科学/人工智能"}),
+    (("后端", "服务端", "后台", "java", "golang", "go开发", "c++", "python开发", "微服务", "分布式", "架构"),
+     {"industry": "软件开发", "major": "计算机类"}),
+    (("前端", "vue", "react", "小程序", "大前端"),
+     {"industry": "前端开发", "major": "计算机类"}),
+    (("测试", "qa", "测开"),
+     {"industry": "测试/质量", "major": "计算机类"}),
+    (("运维", "devops", "sre"),
+     {"industry": "运维/DevOps", "major": "计算机类"}),
+    (("嵌入式", "驱动", "单片机", "fpga", "物联网", "硬件", "芯片", "ic"),
+     {"industry": "嵌入式/硬件", "major": "电子信息"}),
+    (("通信", "5g", "光通信"),
+     {"industry": "通信/网络", "major": "通信"}),
+    (("网络安全", "信息安全", "数据安全"),
+     {"industry": "通信/网络/安全", "major": "计算机类"}),
+    (("android", "ios", "客户端", "移动开发", "unity"),
+     {"industry": "客户端/移动", "major": "计算机类"}),
+    (("人工智能", "ai", "智能驾驶", "智能座舱", "智能应用", "语音"),
+     {"industry": "人工智能/大模型", "major": "数据科学/人工智能"}),
+    (("实施", "交付", "技术支持", "客户成功", "解决方案"),
+     {"industry": "实施/交付", "major": "计算机类"}),
+    # 通用兜底：开发/软件/研发类（放在最后，避免抢具体规则）
+    (("开发工程师", "软件开发", "软件工程师", "研发工程师", "开发", "研发", "程序", "工程师", "coding"),
+     {"industry": "软件开发", "major": "计算机类"}),
+]
+
+
+def suggest_fill(job: Job) -> dict[str, str]:
+    """标题启发式补全行业/专业（仅填补空字段，不静默写库）。
+
+    返回形如 {"industry": "数据开发", "major": "数据科学/人工智能"}，
+    只含「原字段为空」且「能推断」的项；都满或推不出则返空 dict。
+    前端据此展示「建议方向：X」标签，用户点「采用」才写回 job 记录。
+    """
+    t = _norm(job.title)
+    out: dict[str, str] = {}
+    for kws, fill in _SUGGEST_RULES:
+        if any(w in t for w in kws):
+            if not (job.industry or "").strip() and "industry" in fill:
+                out["industry"] = fill["industry"]
+            if not (job.major or "").strip() and "major" in fill:
+                out["major"] = fill["major"]
+            if out:
+                return out
+    return out
+
+
+def direction_match(job: Job, profile: dict) -> tuple[int, list[str]]:
+    """方向匹配 0-30。用户勾选的 canonical 方向类别命中即 30；自定义方向回退字面匹配。
+
+    基于 DIRECTION_CATEGORIES 把库里零散岗位角色归并，覆盖率远高于旧版逐串匹配。
+    """
+    blob = _norm(f"{job.title} {job.industry} {job.major}")
+    hits = []
+    for d in profile.get("directions", []):
+        if d in DIRECTION_CATEGORIES:
+            if any(w in blob for w in DIRECTION_CATEGORIES[d]):
+                hits.append(d)
+        else:
+            if _norm(d) in blob:
+                hits.append(d)
+    return (30 if hits else 0), hits
+
+
+def city_score(job: Job, profile: dict) -> tuple[int, str]:
+    """地区 0-15，分层加权（用户选定方案）。
+
+    目标城市 15 / 一线新一线 8 / 其他 2 / 城市未知 4
+    这样武汉岗浮顶，一线大厂岗排中间仍可见，小城市沉底——
+    既保住本地优先，又不让国聘的全国岗被一刀切埋掉。
+    """
+    city = (job.city or "").strip()
+    if not city:
+        return 4, ""
+    regions = profile.get("regions", [])
+    if any((r in city or city in r) for r in regions):
+        return 15, "地区匹配"
+    if any(t in city for t in TIER_A_CITIES):
+        return 8, "一线/新一线"
+    return 2, ""
+
+
+_DEADLINE_UNKNOWN = ("以官网为准", "招满即止", "长期", "不限", "滚动", "另行通知")
+
+
+def days_to_deadline(job: Job, today: str = "") -> int | None:
+    """距截止还剩几天。无法判断（「以官网为准」/无日期/格式异常）返回 None。
+
+    单独抽出是因为看板的「N 天内截止」筛选也要用 ——
+    deadline 在库里是混合格式文本（'2026-09-01' / '2026年8月20日' / '以官网为准'），
+    SQL 层做不了日期比较，只能解析后在 Python 侧过滤。
+    """
+    import re
+    from datetime import date
+
+    raw = (job.deadline or "").strip()
+    if not raw or any(k in raw for k in _DEADLINE_UNKNOWN):
+        return None
+    nums = re.findall(r"\d+", raw)
+    if len(nums) < 3:
+        return None
+    try:
+        y, m, d = int(nums[0]), int(nums[1]), int(nums[2])
+        if y < 100:
+            y += 2000
+        dl = date(y, m, d)
+    except (ValueError, IndexError):
+        return None
+    try:
+        ref = date.fromisoformat(today) if today else date.today()
+    except ValueError:
+        ref = date.today()
+    return (dl - ref).days
+
+
+def deadline_urgency(job: Job, today: str = "") -> tuple[int, str]:
+    """时效紧急度 0-10。截止日 99% 有数据，旧版完全没用上。
+
+    越近越该先投：≤3天 10 / ≤7天 8 / ≤15天 6 / ≤30天 4 / 更远 3
+    已过期 0 并标红；「以官网为准」等无法判断的给中性 4，不惩罚。
+    """
+    left = days_to_deadline(job, today)
+    if left is None:
+        return 4, ""
+    if left < 0:
+        return 0, "已过期"
+    if left <= 3:
+        return 10, f"⚠{left}天内截止"
+    if left <= 7:
+        return 8, f"{left}天内截止"
+    if left <= 15:
+        return 6, "两周内截止"
+    if left <= 30:
+        return 4, ""
+    return 3, ""
+
+
+def salary_score(job: Job) -> tuple[int, str]:
+    """薪资 0-5。96% 有数据，旧版完全没用上。
+
+    统一折算为「月薪 K」，取区间**下限**保底（上限多是画饼）：
+      ≥20K:5  ≥13K:4  ≥10K:3  ≥7K:2  <7K:1  面议/无:2（中性不惩罚）
+    数据源格式混杂——「12000以上」「20000~30000 元/月」「10-18K」「年薪15万」
+    都要能吃，故按单位归一而非直接取数字。
+    """
+    import re
+
+    raw = (job.salary or "").strip()
+    if not raw or "面议" in raw or "不限" in raw:
+        return 2, ""
+
+    nums = [float(x) for x in re.findall(r"\d+\.?\d*", raw) if float(x) > 0]
+    if not nums:
+        return 2, ""
+    lo = min(nums)
+
+    if "万" in raw:
+        # 「年薪15万」→ 月 12.5K；「月薪1.2万」→ 12K
+        k = lo * 10000 / 12 / 1000 if "年" in raw else lo * 10
+    elif lo >= 1000:
+        k = lo / 1000          # 元/月 → K
+    else:
+        k = lo                 # 已是 K
+
+    k = round(k, 1)
+    label = f"{k:g}K起"
+    if k >= 20:
+        return 5, label
+    if k >= 13:
+        return 4, label
+    if k >= 10:
+        return 3, ""
+    if k >= 7:
+        return 2, ""
+    return 1, ""
+
+
+def nature_score(job: Job, profile: dict | None = None) -> tuple[int, str]:
+    """单位性质 0-8：声望(0-4, 央企>国企>事业>上市/外企>民企) + 勾选加成(0-4)。
+
+    用户画像勾选了某性质（如央企/国企），命中的岗位额外 +4 ——
+    把旧版「心仪性质」单独加分组折叠进正常选择，更干净。
+    """
+    cans = canon_natures(job.nature)
+    if not cans:
+        return 1, ""
+    prestige = max(_NATURE_PRESTIGE.get(c, 1) for c in cans)
+    sel = (profile or {}).get("nature") or []
+    matched = [c for c in cans if c in sel]
+    total = min(prestige + (4 if matched else 0), 8)
+    reason = ("性质:" + "/".join(matched)) if matched else (cans[0] if prestige >= 3 else "")
+    return total, reason
 
 
 def _edu_ok(job_edu: str, user_edu: str) -> bool:
@@ -136,71 +528,123 @@ def hard_filter(job: Job, profile: dict) -> bool:
     if batch != "其他" and profile.get("batches") and batch not in profile["batches"]:
         return False
 
-    # 3b. 学历
-    if not _edu_ok(job.education, profile.get("education", "本科")):
-        return False
-
-    # 3c. 城市（空城市视为未知，广收录，由打分降权）
-    regions = profile.get("regions", [])
-    city = (job.city or "").strip()
-    if city and regions:
-        if not any((r in city or city in r) for r in regions):
-            return False
-
-    # 3d. 用户自定义排除词
+    # 3b. 用户自定义排除词（唯一保留的「硬屏蔽」，避免不想要的行业挤进来）
     excl = profile.get("exclude_keywords", [])
     if excl and any(k in blob for k in excl):
         return False
 
+    # —— 注意：地区 / 学历 不再做入库硬过滤 ——
+    # 用户方案：全量入库（保住国聘全国岗等机会），地区与学历改为「看板层过滤」：
+    #   地区    → 看板「只看目标地区」开关 + 打分地区置顶（见 city_score）
+    #   学历    → 画像「学历门槛」+ 看板按 education 文本过滤（见 store._edu_bucket）
+    # 这样既不丢全国/硕士岗，又能一键聚焦到自己相关的岗位。
     return True
 
 
-def score_job(job: Job, profile: dict) -> tuple[int, str]:
-    """加权打分 0-100 + 一句话理由。
+_LINK_BONUS = {"官方网申": 3, "简章详情": 2, "官方校招页": 1, "源详情页": 1}
 
-    权重分配（技术相关度占大头，杜绝"养猪岗拿 30 分"）：
-      技术相关度 50 / 方向命中 25 / 地区 12 / 央国企 8 / 本科可投 3 / 有直达链接 2
+# 来源降权：低相关度来源整体扣分，避免稀释看板。
+# 2026-08-20 撤销国聘 -8：社招已在 hard_filter 拦截、城市词已补武汉岗，
+# 非目标城市由 city_score 地区分层自然沉底，来源降权属于重复惩罚。
+# 如后续新增聚合噪音源，可在此登记。
+_SOURCE_PENALTY: dict[str, int] = {}
+
+
+def score_job(job: Job, profile: dict, today: str = "") -> tuple[int, str]:
+    """加权打分 0-100 + 一句话理由。权重之和恰为 100，无需截断。
+
+      方向匹配   30  —— canonical 方向类别命中（AI/大模型、数据开发…）
+      技术相关度 22  —— tech_relevance 0-50 缩放；硬过滤已挡非技术岗，降权让位于方向
+      地区       15  —— 分层：目标城市 / 一线新一线 / 其他
+      时效紧急度 10  —— 截止日越近越该先投，过期归零
+      单位性质    8  —— 声望 + 勾选加成（折叠旧「心仪性质」加分组）
+      招聘类型    7  —— 校招/实习等（学生优先，空=不限）
+      薪资        5  —— 区间下限分档，「面议」中性
+      可投递性    3  —— 链接越接近「点了就能投」越高
     """
     reasons: list[str] = []
+    score = 0
 
-    # 技术相关度（0-50）
+    # 方向匹配（0-30）—— 排序主导项
+    dscore, dhits = direction_match(job, profile)
+    score += dscore
+    if dhits:
+        reasons.append("方向:" + "/".join(dhits[:2]))
+
+    # 技术相关度（0-22）：tech_relevance 返回 0-50，等比缩放
     tech = tech_relevance(job)
-    score = tech
+    score += round(tech * 0.44)
     if tech >= 35:
         reasons.append("技术岗强相关")
     elif tech >= 15:
         reasons.append("技术岗相关")
-    else:
-        reasons.append("技术弱相关")
 
-    # 方向命中（0-25）
-    dirs = profile.get("directions", [])
-    blob = _norm(f"{job.title} {job.industry} {job.major}")
-    hit = [d for d in dirs if _norm(d) in blob]
-    if hit:
-        score += 25
-        reasons.append("方向:" + "/".join(hit[:2]))
+    # 地区（0-15）分层
+    cscore, creason = city_score(job, profile)
+    score += cscore
+    if creason:
+        reasons.append(creason)
 
-    # 地区（0-12）
-    regions = profile.get("regions", [])
-    if job.city and any((r in job.city or job.city in r) for r in regions):
-        score += 12
-        reasons.append("地区匹配")
+    # 时效紧急度（0-10）
+    uscore, ureason = deadline_urgency(job, today)
+    score += uscore
+    if ureason:
+        reasons.append(ureason)
 
-    # 单位性质（0-8）
-    if "央企" in (job.nature or "") or "国企" in (job.nature or ""):
-        score += 8
-        reasons.append("央国企稳")
+    # 单位性质（0-8）：声望 + 勾选加成（合并旧「心仪性质」）
+    nscore, nreason = nature_score(job, profile)
+    score += nscore
+    if nreason:
+        reasons.append(nreason)
 
-    # 学历（0-3）
-    if "本科" in (job.education or "") or not job.education:
-        score += 3
+    # 招聘类型（0-7）：校招/实习等（学生优先，空=不限）
+    rscore, rreason = recruit_type_score(job, profile)
+    score += rscore
+    if rreason:
+        reasons.append(rreason)
 
-    # 可投递性（0-5）：链接越接近「点了就能投」，加分越高
-    _LINK_BONUS = {"官方网申": 5, "简章详情": 4, "官方校招页": 2, "源详情页": 1}
+    # 薪资（0-5）
+    sscore, sreason = salary_score(job)
+    score += sscore
+    if sreason:
+        reasons.append(sreason)
+
+    # 可投递性（0-3）
     bonus = _LINK_BONUS.get(job.link_type, 0)
+    score += bonus
     if bonus:
-        score += bonus
         reasons.append(job.link_type)
 
-    return min(score, 100), "；".join(reasons)
+    # 来源降权：低相关度来源整体扣分（见 _SOURCE_PENALTY），避免稀释看板
+    pen = _SOURCE_PENALTY.get((job.source or "").strip())
+    if pen:
+        score -= pen
+        reasons.append("来源降权")
+
+    return min(max(score, 0), 100), "；".join(reasons)
+
+
+def recruit_type_score(job: Job, profile: dict) -> tuple[int, str]:
+    """招聘类型匹配 0-7：用户画像选了校招/实习等，命中的岗位上浮。
+
+    空选（默认）不加分也不扣分；选了校招则非校招岗在此项拿 0，自然靠后——
+    学生用户想聚焦校招时很有用。
+    """
+    sel = profile.get("recruit_type") or []
+    if not sel:
+        return 0, ""
+    rt = recruit_type_of(job.nature)
+    if rt and rt in sel:
+        return 7, f"招聘类型:{rt}"
+    return 0, ""
+
+
+# 分档标签：让看板能一眼分堆，而不是盯着数字猜
+def score_tier(score: int) -> str:
+    if score >= 75:
+        return "优先投"
+    if score >= 60:
+        return "值得投"
+    if score >= 45:
+        return "备选"
+    return "观察"

@@ -25,8 +25,9 @@ STATUS_RANK = {"新": 0, "已看": 1, "已投": 2, "笔试": 3, "面试": 4, "OC
 STATUS_PATTERNS = [
     ("OC", ["录用通知", "录用函", "offer letter", "offer发放", "发放offer", "拟录用",
             "恭喜您被录用", "入职邀请", "已发offer", "offer!"]),
-    ("面试", ["面试邀请", "面试通知", "邀您面试", "面试邀约", "一面通知", "二面通知",
-              "终面通知", "视频面试", "现场面试", "面试安排", "群面通知"]),
+    ("面试", ["面试邀请", "面试通知", "邀您面试", "面试邀约", "一面", "二面", "三面", "终面",
+              "一面通知", "二面通知", "终面通知", "技术面", "hr面", "业务面", "加面",
+              "电话面试", "视频面试", "现场面试", "面试安排", "群面通知"]),
     ("笔试", ["笔试邀请", "笔试通知", "在线笔试", "笔试链接", "在线测评", "测评邀请",
               "笔试安排", "机考通知", "笔试题"]),
     ("已投", ["投递成功", "简历已收到", "简历已查收", "投递完成", "已成功投递",
@@ -161,6 +162,128 @@ def match_company(raw: str, pool: list[str]) -> tuple[str, float]:
         if r == alias or r in canon or canon in r:
             return canon, 0.8
     return "", 0.0
+
+
+# ═══════════════════════════════════════════════════════════════
+# 浏览器扩展：抓取名 ↔ 库内公司 的归一化 + 调和（抓取与匹配共用同一口径）
+# ═══════════════════════════════════════════════════════════════
+
+# 门户/平台类噪音后缀（"联影网申门户" → "联影"）
+_PORTAL_SUFFIX = [
+    "网申门户", "网申系统", "网申平台", "招聘门户", "投递门户", "门户系统", "门户",
+    "校招官网", "校招网", "招聘官网", "招聘网", "投递系统", "个人中心", "申请中心",
+    "我的投递", "投递记录", "申请记录", "网申记录", "招聘首页", "校园招聘",
+]
+# 明显非公司的词（命中则丢弃，不当作公司名）
+_NON_COMPANY_WORDS = {
+    "我的", "个人", "申请", "投递", "简历", "登录", "注册", "首页", "招聘", "职位",
+    "搜索", "详情", "确认", "成功", "完成", "提交", "欢迎", "中心", "后台", "管理",
+    "系统", "通知", "消息", "设置", "帮助", "关于", "协议", "隐私", "用户", "会员",
+    "账户", "订单", "购物车", "收藏", "历史", "足迹", "记录",
+}
+# 域名 → 公司名（大厂在扩展端已覆盖，这里补中厂/校招官网）
+_DOMAIN_COMPANY_SERVER = {
+    "hellogroup": "挚文集团", "immomo": "挚文集团",
+    "united-imaging": "联影医疗", "uii": "联影医疗",
+    "duoyi": "多益网络", "xy": "多益网络",
+    "fun.tv": "fun.tv",
+}
+
+
+def normalize_company(raw: str) -> str:
+    """把抓取到的公司名归一：去【】季节前缀、去门户/平台后缀、去前导噪音。"""
+    if not raw:
+        return ""
+    s = raw.strip()
+    s = re.sub(r"^【[^】]{0,20}】", "", s)            # 【2026校招】
+    s = re.sub(r"^(?:秋招|春招|校招|社招|实习)[-_－\s]*", "", s)
+    for suf in _PORTAL_SUFFIX:
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+            break
+    s = re.sub(r"^(?:我的|个人)[-_－\s]*", "", s)
+    s = s.strip(" ·-_－")
+    return s
+
+
+def is_junk_company(s: str) -> bool:
+    if not s:
+        return True
+    return s in _NON_COMPANY_WORDS or len(s) < 2
+
+
+def infer_company_from_url(url: str) -> str:
+    """从网申页 URL 推断公司（兜底）。"""
+    if not url:
+        return ""
+    try:
+        host = url.split("//", 1)[-1].split("/", 1)[0].lower()
+    except Exception:
+        return ""
+    for d, name in _DOMAIN_COMPANY_SERVER.items():
+        if d in host:
+            return name
+    return ""
+
+
+def reconcile_company(raw: str, pool: list[str], url: str = "") -> tuple[str, float, str]:
+    """抓取名 → 库内公司 的调和。返回 (库内/归一公司名, 置信度, 来源)。
+
+    来源:
+      pool   —— 命中库内已有公司（用于回写漏斗，即"同步"）
+      alias  —— 命中别名表
+      domain —— 域名推断
+      new    —— 归一后是真实新公司名（建新行）
+      none   —— 仍是垃圾，无法识别
+    """
+    norm = normalize_company(raw)
+    if norm:
+        m, score = match_company(norm, pool)
+        if m and score >= 0.5:
+            return m, score, "pool"
+    if norm:
+        for alias, canon in COMPANY_ALIASES.items():
+            if norm == alias or norm in canon or canon in norm:
+                return canon, 0.8, "alias"
+    dom = infer_company_from_url(url)
+    if dom:
+        m, score = match_company(dom, pool)
+        if m and score >= 0.5:
+            return m, score, "pool"
+        return dom, 0.6, "domain"
+    if norm and not is_junk_company(norm):
+        return norm, 0.5, "new"
+    return "", 0.0, "none"
+
+
+def find_extension_row(c, companies: list[str]):
+    """在浏览器扩展来源的行里按归一公司名查重，防止重复新建投递记录。
+
+    companies 传多个口径（原始归一名 + reconcile 规范名），只要归一后
+    与任一口径相同即视为同一投递。返回 sqlite3.Row 或 None。
+    """
+    norms = {normalize_company(x) for x in companies if x}
+    norms.discard("")
+    rows = c.execute(
+        "SELECT raw_hash,company,title,status FROM jobs WHERE source LIKE '浏览器扩展%'"
+    ).fetchall()
+    if not rows:
+        return None
+    # 1) 归一名精确相等
+    for r in rows:
+        if normalize_company(r["company"]) in norms:
+            return r
+    # 2) 模糊兜底：有限公司/股份等后缀差异
+    ext_pool = [r["company"] for r in rows]
+    for comp in companies:
+        if not comp:
+            continue
+        m, s = match_company(comp, ext_pool)
+        if m and s >= 0.6:
+            for r in rows:
+                if r["company"] == m:
+                    return r
+    return None
 
 
 def _extract_company_before(before: str, pool: list[str]) -> str:
@@ -433,7 +556,7 @@ def _extract_company_in_row(row: str, pool: list[str]) -> str:
                 return m2
         # 库内无匹配：记第一个像公司名的片段（含公司/科技等后缀 或 ≥3字）作兜底，用于新建
         if not fallback and (len(f) >= 3 or any(s in f for s in ("公司", "科技", "集团", "网络", "软件", "信息技术", "有限"))):
-            fallback = f
+            fallback = normalize_company(f)
     return fallback
 
 
@@ -463,7 +586,7 @@ def _detect_status_in_row(row: str):
     return None
 
 
-def parse_delivery_list(rows: list[str], db_path: str) -> dict:
+def parse_delivery_list(rows: list[str], db_path: str, url: str = "") -> dict:
     """解析扩展从「我的投递」列表页抓来的一行行文本 → 批量回写看板。
 
     库内已有该岗位：按漏斗更新状态；库内没有：新建真实投递记录
@@ -472,6 +595,15 @@ def parse_delivery_list(rows: list[str], db_path: str) -> dict:
     """
     set_db_path(db_path)
     pool = _build_company_pool(db_path)
+    # 公司自有招聘门户（多益/小米等）：URL 域名推断出的公司直接采信。
+    # 原因：这类页面「我的应聘」行内不含公司名，行内正则抽到的只能是噪音
+    # （如"等待面试安排"），还容易误匹配到库内相似名（如"软件工程师"→"原创软件"）。
+    url_company = ""
+    if url:
+        dom = infer_company_from_url(url)
+        if dom:
+            m, score = match_company(dom, pool)
+            url_company = m if (m and score >= 0.5) else dom
     found: list[tuple[str, str, str]] = []  # (company, title, status)
     for row in rows:
         row = (row or "").strip()
@@ -484,7 +616,10 @@ def parse_delivery_list(rows: list[str], db_path: str) -> dict:
                 status = "已投"
             else:
                 continue
-        company = _extract_company_in_row(row, pool)
+        if url_company:
+            company = url_company
+        else:
+            company = _extract_company_in_row(row, pool)
         if not company:
             continue
         title = _extract_title_in_row(row, company)
@@ -523,6 +658,15 @@ def _apply_delivery_list(found: list[tuple[str, str, str]], db_path: str) -> dic
                 else:
                     skipped.append((matched, target["status"], status))
             else:
+                # 未命中库内公司 → 先在扩展自有投递里查重（归一公司口径），避免重复新建
+                ext = find_extension_row(c, [company])
+                if ext is not None:
+                    if _advance_ok(ext["status"], status):
+                        c.execute("UPDATE jobs SET status=? WHERE raw_hash=?", (status, ext["raw_hash"]))
+                        updated.append((ext["company"], status))
+                    else:
+                        skipped.append((ext["company"], ext["status"], status))
+                    continue
                 raw_hash = hashlib.md5(f"{company}|{title}".encode("utf-8")).hexdigest()
                 c.execute(
                     """INSERT OR IGNORE INTO jobs

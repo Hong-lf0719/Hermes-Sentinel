@@ -10,7 +10,8 @@ import asyncio
 
 from . import sources as src_mod
 from .company_links import resolve_url
-from .matcher import hard_filter, score_job, recognize_batch
+from .matcher import (hard_filter, score_job, recognize_batch,
+                      canon_enterprise_type, detect_exam_free)
 from .models import Job
 from .profile import load_profile
 from .store import get_db, upsert_job, job_stats, prune_invalid
@@ -54,6 +55,14 @@ async def scan_and_match(db_path, profile_path, seed_path=None) -> dict:
         if not hard_filter(j, profile):
             continue
         j.batch = recognize_batch(j.batch or f"{j.title} {j.industry}")
+        # 企业性质归一化：源直接给的 enterprise_type 优先，否则从 nature 原文推断
+        if not j.enterprise_type:
+            j.enterprise_type = canon_enterprise_type(j.nature)
+        # 笔试标注：从 JD/标题/行业文本检测（源已标则保留）
+        if not j.exam_free:
+            j.exam_free = detect_exam_free(
+                f"{j.title} {j.industry} {j.major} {j.jd_text}"
+            )
         # 修正投递链接：聚合源常给自家分页地址，点不到公司。
         # 但若采集源已给出岗位级直链（网申表单 / 招聘简章页），它比公司首页
         # 精准得多，不能被覆盖。

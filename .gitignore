@@ -22,3 +22,14 @@ cloudflared.exe
 # 系统
 .DS_Store
 Thumbs.db
+
+# WorkBuddy 会话数据
+.workbuddy/
+
+# 含个人信息/密钥的本地文档（QQ邮箱、扩展Token），勿公开
+QQ邮箱转发极简设置.md
+浏览器扩展加载极简卡.md
+
+# 网页快照（本地调试用）
+华中科技大学就业信息网.html
+华中科技大学就业信息网_files/
