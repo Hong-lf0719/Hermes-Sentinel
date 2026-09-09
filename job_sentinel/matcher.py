@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from .models import Job
 
 # ---------------------------------------------------------------- 词表
@@ -53,6 +55,19 @@ def _norm(s: str) -> str:
     return (s or "").lower()
 
 
+def _kw_hit(kw: str, text: str) -> bool:
+    """关键词命中：英文关键词按「独立词」匹配（前后不能是字母/数字），
+    防止 2 字母键裸子串误伤 —— "ai" 命中 Trai**ni**ng、"it" 命中 Aud**it**or、
+    "cv" 命中 re**cv**iewer。中文关键词保持子串匹配（中文无词边界）。"""
+    if kw.isascii() and any(c.isalpha() for c in kw):
+        # 自己保证小写：否则调用方漏 lower 时，大写英文技术词（AI/LLM/SQL/Python…）
+        # 会全部漏判 —— 表现为技术岗被误判为非技术岗而遭 hard_filter 丢弃，且无报错。
+        return re.search(
+            rf"(?<![a-z0-9]){re.escape(kw.lower())}(?![a-z0-9])", (text or "").lower()
+        ) is not None
+    return kw in text
+
+
 def recognize_batch(text: str) -> str:
     """从文本识别招聘批次。
 
@@ -87,8 +102,8 @@ def tech_relevance(job: Job) -> int:
     if any(k in title for k in TITLE_BLACKLIST):
         return 0
 
-    title_hits = [k for k in TECH_KEYWORDS if k in title]
-    other_hits = [k for k in TECH_KEYWORDS if k in blob and k not in title_hits]
+    title_hits = [k for k in TECH_KEYWORDS if _kw_hit(k, title)]
+    other_hits = [k for k in TECH_KEYWORDS if _kw_hit(k, blob) and k not in title_hits]
 
     if not title_hits and not other_hits:
         # 聚合站的「公司 + 行业标签」条目：科技行业的公司保留为弱信号线索
@@ -362,22 +377,43 @@ def direction_match(job: Job, profile: dict) -> tuple[int, list[str]]:
     return (30 if hits else 0), hits
 
 
+def split_cities(city: str) -> list[str]:
+    """拆多城市字段：「北京, 上海, 武汉」→ ['北京','上海','武汉']。"""
+    import re
+    return [p.strip() for p in re.split(r"[,，、/;；]", city or "") if p.strip()]
+
+
 def city_score(job: Job, profile: dict) -> tuple[int, str]:
     """地区 0-15，分层加权（用户选定方案）。
 
     目标城市 15 / 一线新一线 8 / 其他 2 / 城市未知 4
     这样武汉岗浮顶，一线大厂岗排中间仍可见，小城市沉底——
     既保住本地优先，又不让国聘的全国岗被一刀切埋掉。
+
+    2026-09-02 修正：多城市岗（如「深圳,北京,上海,…,西安」）只因末位含一个
+    目标城市就拿满 15 分，导致满屏「北京」——用户没标北京却全是北京岗。
+    现在拆城市后看**首个城市**（简章里的主工作地）：
+      首城市命中目标 → 15（地区匹配）
+      仅后续城市命中 → 8（地区含目标，与一线同档，不再霸占首屏）
     """
     city = (job.city or "").strip()
     if not city:
         return 4, ""
     regions = profile.get("regions", [])
-    if any((r in city or city in r) for r in regions):
+    if not regions:
+        return 4, ""
+    parts = split_cities(city)
+    if not parts:
+        return 4, ""
+    hit_idx = [i for i, p in enumerate(parts)
+               if any((r in p or p in r) for r in regions)]
+    if not hit_idx:
+        if any(t in city for t in TIER_A_CITIES):
+            return 8, "一线/新一线"
+        return 2, ""
+    if hit_idx[0] == 0:
         return 15, "地区匹配"
-    if any(t in city for t in TIER_A_CITIES):
-        return 8, "一线/新一线"
-    return 2, ""
+    return 8, f"地区含{parts[hit_idx[0]]}"
 
 
 _DEADLINE_UNKNOWN = ("以官网为准", "招满即止", "长期", "不限", "滚动", "另行通知")
@@ -435,51 +471,111 @@ def deadline_urgency(job: Job, today: str = "") -> tuple[int, str]:
     return 3, ""
 
 
-def salary_score(job: Job) -> tuple[int, str]:
-    """薪资 0-5。96% 有数据，旧版完全没用上。
+def salary_k(raw: str) -> tuple[float | None, str]:
+    """把混杂的薪资文本折算成「月薪 K」。
+
+    返回 (K or None, 展示标签)。无法判断（面议/无数字）返回 (None, "")——
+    抽出来是因为「画像最低薪资门槛」也要用同一个口径，避免两处算法漂移。
+    """
+    import re
+
+    raw = (raw or "").strip()
+    if not raw or "面议" in raw or "不限" in raw:
+        return None, ""
+    nums = [float(x) for x in re.findall(r"\d+\.?\d*", raw) if float(x) > 0]
+    if not nums:
+        return None, ""
+    lo = min(nums)
+
+    # 单位识别（顺序：时 → 天/日 → 周 → 万 → 元）。实习岗大量用日薪/时薪，
+    # 不换算会把「150-300元/天」当成 150K 直接满分，污染看板排序。
+    if "小时" in raw or "时薪" in raw or "/时" in raw:
+        k = lo * 8 * 21.75 / 1000          # 每日8h、每月21.75个工作日
+        unit = "元/时"
+    elif "天" in raw or "日薪" in raw or "/日" in raw or "日结" in raw:
+        k = lo * 21.75 / 1000
+        unit = "元/天"
+    elif "周" in raw or "周薪" in raw:
+        k = lo * 4.35 / 1000
+        unit = "元/周"
+    elif "万" in raw:
+        # 「年薪15万」→ 月 12.5K；「月薪1.2万」→ 12K
+        k = lo * 10000 / 12 / 1000 if "年" in raw else lo * 10
+        unit = ""
+    elif lo >= 1000:
+        k = lo / 1000          # 元/月 → K
+        unit = ""
+    else:
+        k = lo                 # 已是 K
+        unit = ""
+
+    k = round(k, 1)
+    return k, f"{k:g}K起" + (f"({lo:g}{unit})" if unit else "")
+
+
+def salary_score(job: Job, profile: dict | None = None) -> tuple[int, str]:
+    """薪资 0-5（可负：低于画像最低薪资门槛时 -8）。
 
     统一折算为「月薪 K」，取区间**下限**保底（上限多是画饼）：
       ≥20K:5  ≥13K:4  ≥10K:3  ≥7K:2  <7K:1  面议/无:2（中性不惩罚）
     数据源格式混杂——「12000以上」「20000~30000 元/月」「10-18K」「年薪15万」
     都要能吃，故按单位归一而非直接取数字。
+    画像 salary_min>0 时，能解析出薪资且低于门槛的岗 -8（掉一档），
+    解析不出的（面议/空）不惩罚，避免误杀。
     """
-    import re
-
-    raw = (job.salary or "").strip()
-    if not raw or "面议" in raw or "不限" in raw:
+    k, label = salary_k(job.salary or "")
+    if k is None:
         return 2, ""
-
-    nums = [float(x) for x in re.findall(r"\d+\.?\d*", raw) if float(x) > 0]
-    if not nums:
-        return 2, ""
-    lo = min(nums)
-
-    if "万" in raw:
-        # 「年薪15万」→ 月 12.5K；「月薪1.2万」→ 12K
-        k = lo * 10000 / 12 / 1000 if "年" in raw else lo * 10
-    elif lo >= 1000:
-        k = lo / 1000          # 元/月 → K
-    else:
-        k = lo                 # 已是 K
-
-    k = round(k, 1)
-    label = f"{k:g}K起"
     if k >= 20:
-        return 5, label
-    if k >= 13:
-        return 4, label
-    if k >= 10:
-        return 3, ""
-    if k >= 7:
-        return 2, ""
-    return 1, ""
+        base, show = 5, label
+    elif k >= 13:
+        base, show = 4, label
+    elif k >= 10:
+        base, show = 3, ""
+    elif k >= 7:
+        base, show = 2, ""
+    else:
+        base, show = 1, label
+
+    smin = (profile or {}).get("salary_min") or 0
+    if smin > 0 and k < smin:
+        return base - 8, f"薪资{k:g}K<{smin}K"
+    return base, show
+
+
+def major_score(job: Job, profile: dict) -> tuple[int, str]:
+    """专业匹配 0-6（2026-09-02 新增）。
+
+    此前画像的「专业」字段在打分里**完全没被使用**——改专业对看板零影响，
+    是「改了画像却没变化」的主因之一。现在并入权重表：
+      岗位专业为空 → 0（无信号，不惩罚）
+      canon 精确命中画像专业 → 6
+      文本包含命中（「计算机类、电子信息类」含「电子信息」）→ 4
+      不命中 → 0
+    权重来源：技术相关度 22→18、单位性质 8→6，总和仍为 100。
+    """
+    sel = profile.get("major") or []
+    if not sel:
+        return 0, ""
+    mj = (job.major or "").strip()
+    if not mj:
+        return 0, ""
+    mset = {canon_major(m) for m in sel}
+    if canon_major(mj) in mset:
+        return 6, "专业匹配"
+    blob = _norm(f"{mj} {job.title or ''} {job.industry or ''}")
+    hit = [m for m in sel if _norm(m) in blob]
+    if hit:
+        return 4, "专业相关"
+    return 0, ""
 
 
 def nature_score(job: Job, profile: dict | None = None) -> tuple[int, str]:
-    """单位性质 0-8：声望(0-4, 央企>国企>事业>上市/外企>民企) + 勾选加成(0-4)。
+    """单位性质 0-6：声望(0-4, 央企>国企>事业>上市/外企>民企) + 勾选加成(0-4)，上限 6。
 
     用户画像勾选了某性质（如央企/国企），命中的岗位额外 +4 ——
     把旧版「心仪性质」单独加分组折叠进正常选择，更干净。
+    2026-09-02：上限由 8 降为 6，让出 2 分给新增的「专业匹配」维度。
     """
     cans = canon_natures(job.nature)
     if not cans:
@@ -487,7 +583,7 @@ def nature_score(job: Job, profile: dict | None = None) -> tuple[int, str]:
     prestige = max(_NATURE_PRESTIGE.get(c, 1) for c in cans)
     sel = (profile or {}).get("nature") or []
     matched = [c for c in cans if c in sel]
-    total = min(prestige + (4 if matched else 0), 8)
+    total = min(prestige + (4 if matched else 0), 6)
     reason = ("性质:" + "/".join(matched)) if matched else (cans[0] if prestige >= 3 else "")
     return total, reason
 
@@ -554,12 +650,13 @@ def score_job(job: Job, profile: dict, today: str = "") -> tuple[int, str]:
     """加权打分 0-100 + 一句话理由。权重之和恰为 100，无需截断。
 
       方向匹配   30  —— canonical 方向类别命中（AI/大模型、数据开发…）
-      技术相关度 22  —— tech_relevance 0-50 缩放；硬过滤已挡非技术岗，降权让位于方向
-      地区       15  —— 分层：目标城市 / 一线新一线 / 其他
+      技术相关度 18  —— tech_relevance 0-50 缩放；硬过滤已挡非技术岗，降权让位于方向
+      地区       15  —— 分层：目标城市 / 一线新一线 / 其他（多城市看首城市）
       时效紧急度 10  —— 截止日越近越该先投，过期归零
-      单位性质    8  —— 声望 + 勾选加成（折叠旧「心仪性质」加分组）
+      单位性质    6  —— 声望 + 勾选加成（折叠旧「心仪性质」加分组）
       招聘类型    7  —— 校招/实习等（学生优先，空=不限）
-      薪资        5  —— 区间下限分档，「面议」中性
+      专业匹配    6  —— 岗位专业命中画像专业（2026-09-02 新增，此前专业字段是死字段）
+      薪资        5  —— 区间下限分档；低于画像 salary_min 时 -8
       可投递性    3  —— 链接越接近「点了就能投」越高
     """
     reasons: list[str] = []
@@ -571,9 +668,9 @@ def score_job(job: Job, profile: dict, today: str = "") -> tuple[int, str]:
     if dhits:
         reasons.append("方向:" + "/".join(dhits[:2]))
 
-    # 技术相关度（0-22）：tech_relevance 返回 0-50，等比缩放
+    # 技术相关度（0-18）：tech_relevance 返回 0-50，等比缩放
     tech = tech_relevance(job)
-    score += round(tech * 0.44)
+    score += round(tech * 0.36)
     if tech >= 35:
         reasons.append("技术岗强相关")
     elif tech >= 15:
@@ -603,8 +700,14 @@ def score_job(job: Job, profile: dict, today: str = "") -> tuple[int, str]:
     if rreason:
         reasons.append(rreason)
 
-    # 薪资（0-5）
-    sscore, sreason = salary_score(job)
+    # 专业匹配（0-6）
+    mscore, mreason = major_score(job, profile)
+    score += mscore
+    if mreason:
+        reasons.append(mreason)
+
+    # 薪资（0-5，低于画像门槛时 -8）
+    sscore, sreason = salary_score(job, profile)
     score += sscore
     if sreason:
         reasons.append(sreason)

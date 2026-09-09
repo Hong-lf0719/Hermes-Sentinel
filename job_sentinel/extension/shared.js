@@ -2,7 +2,7 @@
 // v2: 过滤非公司标题 + URL域名反推 + 增强岗位匹配
 
 // ── 常见非公司页面标题（命中则丢弃，不当作公司名）──
-var _NON_COMPANY = /^(?:我的|个人|应聘|申请|投递|简历|登录|注册|首页|招聘|职位|搜索|详情|确认|成功|完成|提交|欢迎|中心|后台|管理|系统|通知|消息|设置|帮助|关于|协议|隐私|用户|会员|账户|订单|购物车|收藏|历史|足迹|足迹|足迹)$/i;
+var _NON_COMPANY = /^(?:我的|个人|应聘|申请|投递|简历|登录|注册|首页|招聘|职位|搜索|详情|确认|成功|完成|提交|欢迎|中心|后台|管理|系统|通知|消息|设置|帮助|关于|协议|隐私|用户|会员|账户|订单|购物车|收藏|历史|足迹)$/i;
 
 // ── 域名 → 公司名映射（常见校招/社招官网）──
 var _DOMAIN_COMPANY = {
@@ -20,10 +20,10 @@ var _DOMAIN_COMPANY = {
   "deepseek": "DeepSeek", "baichuan": "百川智能", "01ai": "零一万物",
   "antgroup": "蚂蚁集团", "antfin": "蚂蚁金服",
   "didichuxing": "滴滴", "hellobike": "哈啰出行",
-  "kuaishou": "快手", "bilibili": "哔哩哔哩", "bilibili": "B站",
+  "kuaishou": "快手", "bilibili": "哔哩哔哩",
   "xiaohongshu": "小红书", "red": "小红书",
-  "shein": "SHEIN", "ctrip": "携程", "ctrip": "携程", "ly": "同程旅行",
-  "ke": "科恩", "changfei": "长飞光纤", "zfyt": "中飞",
+  "shein": "SHEIN", "ctrip": "携程", "ly": "同程旅行",
+  "changfei": "长飞光纤", "zfyt": "中飞",
   "zte": "中兴通讯", "fiberhome": "烽火通信", "yonyou": "用友网络",
   "kingdee": "金蝶软件", "iFlytek": "科大讯飞", "iflytek": "科大讯飞",
   "inspur": "浪潮信息", "huice": "慧策", "beisen": "北森",
@@ -86,8 +86,12 @@ function guessCompany(input, url) {
     try {
       var host = new URL(url).hostname.toLowerCase();
       for (var d in _DOMAIN_COMPANY) {
-        if (_DOMAIN_COMPANY[d] !== null && host.indexOf(d) !== -1)
-          return _DOMAIN_COMPANY[d];
+        var comp = _DOMAIN_COMPANY[d];
+        if (comp === null) continue;
+        // 严格域段匹配：键必须命中完整域名段（开头/独立段），
+        // 裸子串会让 "ly" 命中 app**ly**.mokahr.com、"ke" 命中任意含 ke 的域名
+        if (host === d || host.indexOf(d + ".") === 0 || host.indexOf("." + d + ".") !== -1)
+          return comp;
       }
     } catch (e) {}
   }

@@ -52,6 +52,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+# MCP 工具客户端：让 Hermes 作为 Host 动态发现并调用 MCP Server 工具。
+# import 失败（未装 mcp 包）时降级为纯本地工具，不影响核心功能。
+try:
+    from mcp_client import MCPToolClient
+    _MCP_AVAILABLE = True
+except Exception:
+    _MCP_AVAILABLE = False
+    MCPToolClient = None
+
 logger = logging.getLogger("hermes")
 
 # 加载 .env（Caspian 密钥等）
@@ -67,9 +76,10 @@ API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 BASE_URL = "https://api.deepseek.com/v1"
 MODEL = "deepseek-v4-flash"
 AUTH_HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-# 仅监听本机回环地址：避免同网段任意设备访问本服务。
+# 仅默认监听本机回环地址：避免同网段任意设备访问本服务。
 # 关键点：execute_command 工具可触发本机命令执行，0.0.0.0 暴露等同于把受限 RCE 暴露给局域网。
-HOST = "127.0.0.1"
+# Docker/云平台部署时通过环境变量 HOST=0.0.0.0 覆盖（容器内绑 127.0.0.1 会导致端口映射失效）。
+HOST = os.getenv("HOST", "127.0.0.1")
 # 端口优先读环境变量 PORT（云端平台动态分配端口），本地默认 9865
 PORT = int(os.getenv("PORT", 9866))
 
@@ -84,6 +94,8 @@ WEB_TOKEN = os.getenv("WEB_TOKEN", secrets.token_hex(16))
 # GitHub API 可选令牌：填入可把匿名 60 次/小时 提额到 5000 次/小时，缓解限流
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 KB_PATH = Path(__file__).parent / "kb"           # 长期知识库（RAG）持久化目录
+# 可观测性：单次工具调用耗时超过该阈值（毫秒）即触发自我诊断（即使没报错，也可能卡顿/降级）
+SLOW_TRACE_MS = int(os.getenv("SLOW_TRACE_MS", 8000))
 
 # ============================================================
 # SQLite 记忆系统
@@ -97,6 +109,19 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
+def _now_local() -> str:
+    """统一时间口径：本地时间（UTC+8）字符串。
+
+    SQLite 的 CURRENT_TIMESTAMP 存的是 **UTC**，而项目里 Python 侧（报告日期、
+    first_seen、画像 updated_at）一律用 datetime.now() 的本地时间 —— 两者混用
+    会差 8 小时，跨零点时「今天的对话/今天新增」会整体错一天。
+    因此所有入库时间统一显式传本参数值，不再依赖 SQL 端默认值
+    （显式传值还有个好处：对**已存在**的表也立刻生效，
+    而改 CREATE TABLE 的 DEFAULT 只影响新建库）。
+    """
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def init_db():
     with get_db() as db:
         db.execute("""
@@ -104,7 +129,7 @@ def init_db():
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now','localtime')),
                 tool_name TEXT,
                 tool_result TEXT
             )
@@ -116,11 +141,62 @@ def init_db():
                 report_type TEXT NOT NULL,
                 data_json TEXT NOT NULL,
                 html TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now','localtime'))
             )
         """)
+        # 可观测性：记录每次工具调用的客观 trace（入参/出参/耗时/状态/错误），供自我诊断回放
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                tool_args TEXT,
+                tool_result TEXT,
+                status TEXT NOT NULL,
+                error_msg TEXT,
+                duration_ms REAL,
+                created_at TIMESTAMP DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        db.execute("CREATE INDEX IF NOT EXISTS idx_traces_session ON traces(session_id, id)")
+        # 结构化用户画像：key-value 表，统一管理用户事实（毕业/城市/技能/方向），
+        # 由 profile_update 工具动态维护，注入 system prompt（lemmalog 思路的轻量落地）。
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS user_profile (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        # 预置默认画像（INSERT OR IGNORE 保证重复初始化不覆盖用户已更新的值）
+        _default_profile = {
+            "毕业年份": "2027",
+            "学校": "四川大学锦江学院",
+            "专业": "数据科学与大数据技术",
+            "目标城市": "武汉/孝感",
+            "求职方向": "AI 应用开发 / 数据开发（避开算法岗）",
+            "技能栈": "Python、LangGraph、Streamlit、SQLite、FastAPI、数据分析",
+        }
+        for _k, _v in _default_profile.items():
+            db.execute("INSERT OR IGNORE INTO user_profile (key, value) VALUES (?, ?)", (_k, _v))
         db.commit()
     print("🗄️ SQLite 记忆已就绪")
+
+def load_profile() -> dict:
+    """读取结构化用户画像（key -> value）。"""
+    with get_db() as db:
+        rows = db.execute("SELECT key, value FROM user_profile").fetchall()
+    return {r["key"]: r["value"] for r in rows}
+
+def update_profile(key: str, value: str) -> None:
+    """更新（UPSERT）一条用户画像。"""
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO user_profile (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value, _now_local())
+        )
+        db.commit()
 
 def load_history(session_id: str, max_messages: int = 30) -> list[dict]:
     """加载对话历史"""
@@ -141,9 +217,26 @@ def save_message(session_id: str, role: str, content: str, tool_name: str = None
     """保存单条消息"""
     with get_db() as db:
         db.execute(
-            "INSERT INTO conversations (session_id, role, content, tool_name, tool_result) VALUES (?,?,?,?,?)",
-            (session_id, role, content, tool_name, tool_result)
+            "INSERT INTO conversations (session_id, role, content, tool_name, tool_result, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (session_id, role, content, tool_name, tool_result, _now_local())
         )
+
+
+def _save_trace(session_id: str, tool_name: str, tool_args: dict,
+                result, status: str, error_msg: str = "", duration_ms: float = 0.0):
+    """记录一次工具调用的客观 trace（完整入参/出参/耗时/状态），供自我诊断回放。
+    与 conversations 表（业务对话）分离：trace 是「客观发生了什么」，诊断只看这里，不看模型自述。"""
+    try:
+        with get_db() as db:
+            db.execute(
+                "INSERT INTO traces (session_id, tool_name, tool_args, tool_result, status, error_msg, "
+                "duration_ms, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (session_id, tool_name, json.dumps(tool_args, ensure_ascii=False),
+                 str(result)[:2000], status, error_msg, round(duration_ms, 1), _now_local())
+            )
+    except Exception as e:
+        logger.warning(f"trace 落库失败（不影响主流程）: {e}")
 
 def save_conversation(session_id: str, messages: list[dict]):
     """全量替换保存对话"""
@@ -151,8 +244,8 @@ def save_conversation(session_id: str, messages: list[dict]):
         db.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
         for msg in messages:
             db.execute(
-                "INSERT INTO conversations (session_id, role, content) VALUES (?,?,?)",
-                (session_id, msg["role"], msg.get("content", ""))
+                "INSERT INTO conversations (session_id, role, content, created_at) VALUES (?,?,?,?)",
+                (session_id, msg["role"], msg.get("content", ""), _now_local())
             )
         db.commit()
 
@@ -161,8 +254,8 @@ def _save_report(report_type: str, data: dict, html: str = None):
     try:
         with get_db() as db:
             db.execute(
-                "INSERT INTO reports (report_type, data_json, html) VALUES (?,?,?)",
-                (report_type, json.dumps(data, ensure_ascii=False), html or "")
+                "INSERT INTO reports (report_type, data_json, html, created_at) VALUES (?,?,?,?)",
+                (report_type, json.dumps(data, ensure_ascii=False), html or "", _now_local())
             )
     except Exception as e:
         logger.warning(f"报告存档失败（不影响推送）: {e}")
@@ -183,6 +276,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 全局禁用响应缓存：岗位/对话/trace 等都是实时数据接口。
+# 若被浏览器或中间代理按启发式缓存，会出现「改了画像→重算→列表仍显示旧数据」的陈旧问题。
+@app.middleware("http")
+async def _no_store(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
 static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -191,17 +294,40 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 import threading as _threading
 _SHUTDOWN = _threading.Event()
 
+# Caspian 客户端全局引用（start_caspian 成功后赋值）：启动扫描推送等主动发信场景复用
+_caspian_client = None
+
+
+# ── MCP 工具接入 ──
+# 已迁到 MCP Server 的 4 个情报工具：由 mcp_server.py 动态提供，
+# Hermes 通过 mcp_tools 运行时发现并调用，实现「工具与 Host 解耦」。
+MCP_TOOL_NAMES = {"search_github", "hackernews_top", "arxiv_latest", "web_search"}
+mcp_tools = MCPToolClient() if _MCP_AVAILABLE else None
+
 
 # Caspian 邮件渠道作为后台协程启动（用 uvicorn.run 标准入口时，
 # 靠 startup 事件拉起，避免 Windows 下 asyncio.run + Server.serve 的信号冲突）
 @app.on_event("startup")
 async def _startup_caspian():
     asyncio.create_task(start_caspian())
+    # 启动自动扫描：延迟触发（等服务就绪 + Caspian 连上），高分新岗推邮件
+    asyncio.create_task(_startup_auto_scan())
+    # MCP 工具 Server 启动：失败仅告警并降级为纯本地工具，不阻塞服务
+    if mcp_tools is not None:
+        try:
+            await mcp_tools.start()
+        except Exception as e:
+            logger.warning(f"[MCP] 工具 Server 启动失败，降级为纯本地工具: {e}")
 
 
 @app.on_event("shutdown")
 async def _shutdown_signal():
     _SHUTDOWN.set()
+    if mcp_tools is not None:
+        try:
+            await mcp_tools.stop()
+        except Exception as e:
+            logger.warning(f"[MCP] 关闭工具 Server 异常: {e}")
 
 # ============================================================
 # System Prompt
@@ -211,6 +337,7 @@ SYSTEM_PROMPT = """你是 Hermes，用户的专属 AI 情报官。
 用户画像：{profile}
 
 规则：中文回答，简洁务实。信息要筛选——只告诉用户对他求职和学习有用的东西，不用什么都报。提供可操作的建议。
+**当用户在对话中明确告知新的个人信息（如换了目标城市、新增技能、更新求职方向、毕业年份等）时，调用 profile_update 工具更新用户画像。**
 **不要预设固定的区块/表格结构。如果某个方面没有足够信息，直接不写，不要留空标题。**
 **必须使用 content 字段输出回答，不要只输出 reasoning_content。**
 **绝对禁止在回复中输出任何内部分析语言或指令复述**——不得出现\"我们注意到\"\"需要根据用户画像\"\"需要注意的是\"\"只输出content\"\"回答要简洁\"之类的话，也不得复述系统指令。直接给出面向用户的最终回答正文，第一句就进入正题。**"""
@@ -232,8 +359,15 @@ DIRECTION_PROFILES = {
 }
 
 def _build_system_prompt(direction: str = "数据科学") -> str:
-    """根据方向构建动态 SYSTEM_PROMPT"""
+    """根据方向构建动态 SYSTEM_PROMPT，并附加结构化用户画像。"""
     profile = DIRECTION_PROFILES.get(direction, DIRECTION_PROFILES["数据科学"])
+    try:
+        up = load_profile()
+        if up:
+            extra = "；".join(f"{k}: {v}" for k, v in up.items())
+            profile = f"{profile} 用户结构化画像：{extra}"
+    except Exception as e:
+        logger.warning(f"加载用户画像失败（已跳过注入）: {e}")
     return SYSTEM_PROMPT.format(profile=profile)
 
 # ============================================================
@@ -417,8 +551,35 @@ TOOLS = [
                 "required": ["text"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "profile_update",
+            "description": "更新用户结构化画像（如 毕业年份/目标城市/技能栈/求职方向）。当用户在对话中明确告知新的个人信息时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "画像字段名，如 目标城市/技能栈/求职方向"},
+                    "value": {"type": "string", "description": "新的字段值"}
+                },
+                "required": ["key", "value"]
+            }
+        }
     }
 ]
+
+
+def _build_effective_tools() -> list[dict]:
+    """合并本地工具 + MCP Server 动态工具，生成 OpenAI function calling 列表。
+
+    - MCP 就绪：4 个情报工具由 mcp_server.py 提供（schema 运行时发现），本地只保留其余 10 个
+    - MCP 未就绪/失败：全部回退本地 TOOLS（降级，不影响核心功能）
+    """
+    if mcp_tools is not None and mcp_tools.is_ready():
+        local = [t for t in TOOLS if t["function"]["name"] not in MCP_TOOL_NAMES]
+        return local + mcp_tools.to_openai_tools()
+    return list(TOOLS)
 
 
 # ============================================================
@@ -456,7 +617,7 @@ def _command_allowed(command: str):
         return False, "命令为空"
     # 0) shell 元字符拦截（防 `dir & whoami`、`a | b` 等链式注入，最高优先级）
     if any(ch in c for ch in _SHELL_META):
-        return False, "含禁止的 shell 元字符（& | ; > < ^ `）"
+        return False, "含禁止的 shell 元字符（& | ; > < ^ ` % ( ) 及换行）"
     # 1) 危险命令词边界匹配（避免误伤 git status 中的 'at'、format 中的 'rm'）
     for d in COMMAND_DENYLIST:
         if _re.search(r"(?<![a-z0-9])" + _re.escape(d) + r"(?![a-z0-9])", low):
@@ -492,22 +653,37 @@ async def execute_command(command: str) -> str:
     ok, why = _command_allowed(command)
     if not ok:
         return f"⛔ 已拦截: {why}"
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            f'cmd /c "{command}"',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        out = (stdout or b"").decode("utf-8", errors="replace").strip()
-        err = (stderr or b"").decode("utf-8", errors="replace").strip()
-        r = f"[exit={proc.returncode}]\n{out}"
-        if err: r += f"\n[stderr]\n{err}"
-        return r[:3000]
-    except asyncio.TimeoutError:
-        return "超时 (30s)"
-    except Exception as e:
-        return f"错误: {e}"
+
+    def _dec(b: bytes) -> str:
+        """cmd /c 的中文输出是 GBK(CP936)，硬按 utf-8 解会产生乱码
+        （实测 `dir` 输出变成 'D:\\31227\\Ӧ��'）。先试 utf-8（python 等脚本输出），
+        失败再回退 gbk（cmd 原生中文）。"""
+        try:
+            return b.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                return b.decode("gbk")
+            except UnicodeDecodeError:
+                return b.decode("utf-8", errors="replace")
+
+    def _run() -> str:
+        try:
+            proc = subprocess.run(["cmd", "/c", command], capture_output=True, timeout=30)
+            out = _dec(proc.stdout or b"").strip()
+            err = _dec(proc.stderr or b"").strip()
+            r = f"[exit={proc.returncode}]\n{out}"
+            if err:
+                r += f"\n[stderr]\n{err}"
+            return r[:3000]
+        except subprocess.TimeoutExpired:
+            return "超时 (30s)"
+        except Exception as e:
+            return f"错误: {e}"
+
+    # 启动入口强制 WindowsSelectorEventLoopPolicy（修端口绑定问题），但 Selector 循环
+    # 不支持 create_subprocess_*（NotImplementedError）。改用线程池跑同步 subprocess，
+    # 既不阻塞事件循环，也不依赖 Proactor。
+    return await asyncio.to_thread(_run)
 
 
 # 文件读写白名单：仅允许在项目根目录及用户常用目录内操作，
@@ -587,11 +763,14 @@ async def write_file(path: str, content: str) -> str:
 
 
 async def search_github(keyword: str, max_results: int = 5) -> str:
+    headers = {"Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     try:
         async with httpx.AsyncClient(timeout=15, verify=certifi.where()) as cli:
             r = await cli.get("https://api.github.com/search/repositories", params={
                 "q": keyword, "sort": "stars", "order": "desc", "per_page": max_results
-            })
+            }, headers=headers)
             if r.status_code != 200:
                 return f"GitHub API {r.status_code}"
             data = r.json()
@@ -819,6 +998,25 @@ async def kb_stats() -> str:
         return f"📚 长期记忆库：{s['docs']} 篇文档 / {s['chunks']} 个片段，嵌入模型 {s['embedding']}（维度 {s['dim']}）"
     except Exception as e:
         return f"⚠️ 无法读取知识库: {e}"
+
+
+# 用户画像白名单：profile_update 只允许这些字段，防止 LLM 乱写画像
+_PROFILE_ALLOWED_KEYS = {"毕业年份", "学校", "专业", "目标城市", "求职方向", "技能栈", "求职状态", "期望薪资", "备注"}
+
+
+async def profile_update(key: str, value: str) -> str:
+    """更新用户结构化画像（白名单字段）。"""
+    key = (key or "").strip()
+    value = (value or "").strip()
+    if not key or not value:
+        return "⚠️ key 和 value 都不能为空"
+    if key not in _PROFILE_ALLOWED_KEYS:
+        return f"⚠️ 字段「{key}」不在白名单（允许: {', '.join(sorted(_PROFILE_ALLOWED_KEYS))}）"
+    try:
+        update_profile(key, value)
+        return f"✅ 已更新画像「{key}」= {value}"
+    except Exception as e:
+        return f"⚠️ 画像更新失败: {e}"
 
 
 # —— 简单 TTL 缓存：缓解 GitHub/arXiv/HN/新闻 外部 API 限流（日报频繁生成时不重复打）——
@@ -1437,17 +1635,39 @@ async def ai_job_report(direction: str = "数据科学") -> dict:
     return {"error": f"岗位情报生成失败(重试耗尽): {last_err}"}
 
 
-async def run_sentinel() -> str:
-    """执行一次秋招哨兵扫描，返回人类可读摘要（供 LLM 转述 / 口令直接返回）。"""
+# 服务端扫描并发锁：网页按钮 / 聊天口令 / LLM 工具三条触发路径共用，
+# 防止并发双扫描对同一 hermes.db 双写（database is locked）。
+_scan_lock = asyncio.Lock()
+
+
+async def _scan_once() -> dict:
+    """跑一次哨兵扫描（三条触发路径的统一入口）。
+
+    扫描内含逐行 commit 的同步 SQLite 写循环，直接 await 会卡死主事件循环
+    约 1-2 分钟（期间扩展上报/看板全部挂起）。改为在工作线程里用独立事件
+    循环执行整个 async 扫描，主循环保持响应；并发触发直接拒绝而非排队。
+    """
     from job_sentinel.scan import scan_and_match
     from pathlib import Path
     base = Path(__file__).parent
+    if _scan_lock.locked():
+        raise RuntimeError("已有一次扫描正在进行，请等它结束再试")
+    async with _scan_lock:
+        def _run() -> dict:
+            return asyncio.run(scan_and_match(
+                db_path=str(DB_PATH),
+                profile_path=str(base / "job_sentinel" / "profile.json"),
+                seed_path=str(base / "job_sentinel" / "seed_jobs.json"),
+            ))
+        return await asyncio.to_thread(_run)
+
+
+async def run_sentinel() -> str:
+    """执行一次秋招哨兵扫描，返回人类可读摘要（供 LLM 转述 / 口令直接返回）。"""
     try:
-        res = await scan_and_match(
-            db_path=str(DB_PATH),
-            profile_path=str(base / "job_sentinel" / "profile.json"),
-            seed_path=str(base / "job_sentinel" / "seed_jobs.json"),
-        )
+        res = await _scan_once()
+    except RuntimeError as e:  # noqa: BLE001
+        return f"⏳ {e}"
     except Exception as e:  # noqa: BLE001
         return f"⚠️ 哨兵扫描失败: {e}"
     top = res["top"][:5]
@@ -1457,6 +1677,70 @@ async def run_sentinel() -> str:
         lines.append(f"· [{j.get('match_score')}分] {j.get('company')} · {j.get('title')} · {city} · {j.get('batch')}｜{j.get('match_reason')}")
     lines.append("打开「岗位哨兵」页面查看全部，并可一键标记投递状态。")
     return "\n".join(lines)
+
+
+# ── 启动自动扫描：每次服务启动后自动跑一轮，高分新岗推送邮件 ──
+# 用户不是 7×24 开机，改为「开电脑启动 Hermes → 自动扫一次」，新岗位主动找人。
+AUTO_SCAN_DELAY_S = 10        # 等 Caspian 连上、服务完全就绪再扫
+AUTO_SCAN_NEW_MIN_SCORE = 60  # 新岗位达到该分数才推送（低分新岗只在看板安静躺着）
+AUTO_SCAN_PUSH_TOP_N = 10
+
+
+def _push_email_via_caspian(text: str, html: str = "") -> bool:
+    """主动发邮件到用户 QQ 邮箱（复用 Caspian 连接；SDK 全同步，放线程池跑）。"""
+    if _caspian_client is None:
+        return False
+    def _send():
+        convs = _caspian_client.list_conversations() or []
+        if not convs:
+            return False
+        cid = convs[0].get("id") or convs[0].get("conversation_id")
+        if not cid:
+            return False
+        _caspian_client.send_message(cid, text=text, html=html or None)
+        return True
+    try:
+        return asyncio.run_coroutine_threadsafe(
+            asyncio.to_thread(_send), asyncio.get_event_loop()
+        ).result(timeout=30)
+    except Exception as e:
+        logger.warning(f"启动扫描推送失败（不影响扫描结果）: {e}")
+        return False
+
+
+async def _startup_auto_scan():
+    """启动后自动扫描一次；有高分新岗则推邮件摘要。任何失败只记日志。"""
+    await asyncio.sleep(AUTO_SCAN_DELAY_S)
+    if _SHUTDOWN.is_set():
+        return
+    try:
+        res = await _scan_once()
+    except RuntimeError:
+        return  # 启动窗口内用户手动触发了扫描，不重复跑
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"启动自动扫描失败（不影响服务）: {e}")
+        return
+    logger.info(
+        f"启动自动扫描完成：采集 {res.get('collected', 0)}，"
+        f"入库 {res.get('kept', 0)}，新增 {res.get('new', 0)}"
+    )
+    # 高分新岗推送：top 里只挑本次新增且达分数线的（top 是按分数排序的前 10）
+    fresh = [j for j in res.get("top", [])
+             if (j.get("first_seen") or "") >= datetime.now().strftime("%Y-%m-%d")]
+    hot = [j for j in fresh if (j.get("match_score") or 0) >= AUTO_SCAN_NEW_MIN_SCORE]
+    if not hot:
+        return
+    lines = [f"🎯 本次扫描发现 {len(hot)} 个高分新岗位：", ""]
+    for j in hot[:AUTO_SCAN_PUSH_TOP_N]:
+        city = j.get("city") or "地点未知"
+        lines.append(
+            f"[{j.get('match_score')}分] {j.get('company')} · {j.get('title')} · {city}"
+            + (f" · 截止 {j.get('deadline')}" if j.get("deadline") else "")
+        )
+    lines.append("")
+    lines.append("完整列表打开岗位哨兵看板：http://127.0.0.1:" + str(PORT) + "/jobs")
+    if _push_email_via_caspian("\n".join(lines)):
+        logger.info(f"已推送 {len(hot)} 个高分新岗到邮箱")
 
 
 async def job_sentinel_scan() -> str:
@@ -1490,7 +1774,125 @@ TOOL_MAP = {
     "kb_stats": kb_stats,
     "job_sentinel_scan": job_sentinel_scan,
     "job_sync_email": job_sync_email,
+    "profile_update": profile_update,
 }
+
+
+async def _execute_tool(fn_name: str, fn, fn_args: dict, direction: str):
+    """统一工具执行：MCP 工具优先 → 日报特殊处理 → 本地普通工具。"""
+    if mcp_tools is not None and mcp_tools.has(fn_name):
+        return await mcp_tools.call(fn_name, fn_args)
+    if fn_name in ("ai_daily_report", "ai_job_report"):
+        return await fn(direction=direction) if fn else f"未知工具: {fn_name}"
+    return await fn(**fn_args) if fn else f"未知工具: {fn_name}"
+
+
+async def _execute_tool_with_retry(fn_name: str, fn, fn_args: dict, direction: str,
+                                   max_retries: int = 1):
+    """带自动重试的工具执行（dot-reflex 轻量版）。
+
+    失败后自动重试 max_retries 次，全部失败才回灌错误。
+    返回 (result, status, err)，status ∈ {ok, ok_retry, error}。
+    """
+    last_err = ""
+    for attempt in range(max_retries + 1):
+        try:
+            result = await _execute_tool(fn_name, fn, fn_args, direction)
+            ok, note = _verify_result(fn_name, fn_args, result)
+            if not ok:
+                # 瞬时故障（限流/网络抖动/超时）才重试；确定性失败（如被拦截）重试无意义
+                _retryable = note.startswith(_RETRY_MARK)
+                _clean = note[len(_RETRY_MARK):] if _retryable else note
+                if _retryable and attempt < max_retries:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    logger.warning(
+                        f"[恢复] 工具 {fn_name} 校验未通过（瞬时故障），重试: {_clean}")
+                    continue
+                logger.warning(f"[校验] 工具 {fn_name} 结果未通过: {_clean}")
+                _fail = f"[结果校验失败] {fn_name}: {_clean}\n原始输出: {str(result)[:500]}"
+                return _fail, "error", _clean
+            return result, ("ok_retry" if attempt > 0 else "ok"), ""
+        except Exception as e:
+            last_err = str(e)
+            if attempt < max_retries:
+                await asyncio.sleep(0.5 * (attempt + 1))
+                logger.warning(f"[恢复] 工具 {fn_name} 第 {attempt + 1} 次失败，自动重试: {e}")
+    return f"[工具执行失败] {fn_name}: {last_err}", "error", last_err
+
+
+# 校验未通过时，note 带此前缀表示「瞬时故障、值得重试」；
+# 无前缀表示「确定性失败」（如被安全白名单拦截），重试无意义。
+_RETRY_MARK = "可重试|"
+
+
+def _verify_result(fn_name: str, fn_args: dict, result) -> tuple[bool, str]:
+    """确定性校验工具结果（reverify「模型提议、工具裁决」落地）。
+
+    工具返回后不直接信模型转述，而是用 exit code / 文件操作标记 / 搜索异常等
+    客观信号做即时验证，拦截「模型以为成功但实际失败」的幻觉。
+    返回 (是否通过, 校验说明)。"""
+    r = str(result) if result is not None else ""
+
+    # 1. 命令执行：只把「工具本身故障」判失败。
+    #    exit≠0 是命令成功执行后的「否定结论」，交给模型按语义解读；
+    #    典型误杀场景：grep 无匹配(1) / pytest 失败(1) / git diff 有差异(1) / 端口未监听。
+    if fn_name == "execute_command":
+        if r.startswith("⛔ 已拦截"):
+            return False, "命令被安全白名单拦截，未执行"
+        if r.startswith("超时"):
+            return False, _RETRY_MARK + "命令执行超时（30s）"
+        if r.startswith("错误"):
+            return False, _RETRY_MARK + "命令执行抛异常"
+        m = re.search(r"\[exit=(-?\d+)\]", r)
+        if m and int(m.group(1)) != 0:
+            return True, (f"命令已执行完毕，exit code = {m.group(1)}"
+                          "（非零＝否定结论，非工具故障，请按语义解读）")
+        return True, "exit code = 0"
+
+    # 2. 文件读写：核对失败标记（拒绝访问 / 不存在 / 异常）
+    if fn_name in ("write_file", "read_file"):
+        for bad in ("拒绝访问", "不存在", "错误:"):
+            if r.startswith(bad):
+                return False, f"{fn_name} 失败: {r[:80]}"
+        return True, "文件操作成功"
+
+    # 3. 搜索类：API 错误 / 异常 判失败且可重试（限流、网络抖动多为瞬时）；
+    #    空结果不判失败——搜冷门话题没匹配是合法答案，应由模型自行决定是否换关键词。
+    if fn_name in ("search_github", "web_search", "arxiv_latest", "hackernews_top"):
+        if r.startswith("错误") or r.startswith("超时") or "GitHub API 4" in r or "GitHub API 5" in r:
+            return False, _RETRY_MARK + f"搜索失败: {r[:80]}"
+        if not r.strip():
+            return True, "无匹配结果（合法空结果，非故障）"
+        return True, "返回有效内容"
+
+    # 默认：无专项校验，放行
+    return True, "无专项校验"
+
+
+async def _run_one_tool(tc: dict, session_id: str, direction: str):
+    """执行单个工具调用并落 trace（供 asyncio.gather 并行调用）。返回 (tc, result)。
+
+    双层兜底：①工具异常转错误文本 ②trace 落库异常仅记日志。
+    保证单个工具的失败不会经 gather 拖垮同一轮内的其他工具。
+    """
+    fn_name = tc["function"]["name"]
+    try:
+        fn_args = json.loads(tc["function"]["arguments"])
+    except json.JSONDecodeError:
+        fn_args = {}
+    fn = TOOL_MAP.get(fn_name)
+    _t0 = time.perf_counter()
+    try:
+        result, _status, _err = await _execute_tool_with_retry(fn_name, fn, fn_args, direction)
+    except Exception as e:  # _execute_tool_with_retry 之外抛出的异常（理论上极少）
+        result, _status, _err = f"[工具异常] {fn_name}: {e}", "error", str(e)
+        logger.warning(f"工具 {fn_name} 执行异常（已隔离）: {e}")
+    try:
+        _save_trace(session_id, fn_name, fn_args, result, _status, _err,
+                    (time.perf_counter() - _t0) * 1000)
+    except Exception as te:  # trace 落库失败不应影响主流程
+        logger.warning(f"trace 落库失败（不影响主流程）: {te}")
+    return tc, result
 
 
 # ============================================================
@@ -1597,7 +1999,7 @@ async def process_chat(message: str, session_id: str = "default", direction: str
 
     try:
         async with httpx.AsyncClient(timeout=120, verify=certifi.where()) as cli:
-            payload = {"model": MODEL, "messages": history, "tools": TOOLS, "tool_choice": "auto", "max_tokens": 4096, "stream": False}
+            payload = {"model": MODEL, "messages": history, "tools": _build_effective_tools(), "tool_choice": "auto", "max_tokens": 4096, "stream": False}
 
             r = await cli.post(
                 f"{BASE_URL}/chat/completions",
@@ -1616,41 +2018,63 @@ async def process_chat(message: str, session_id: str = "default", direction: str
                     break
                 history.append(msg)
 
-                for tc in msg["tool_calls"]:
-                    fn_name = tc["function"]["name"]
-                    try:
-                        fn_args = json.loads(tc["function"]["arguments"])
-                    except json.JSONDecodeError:
-                        fn_args = {}
-                    fn = TOOL_MAP.get(fn_name)
-                    try:
-                        # 日报/求职报告需传入用户方向，LLM 不会传此参数
-                        if fn_name in ("ai_daily_report", "ai_job_report"):
-                            result = await fn(direction=direction) if fn else f"未知工具: {fn_name}"
-                        else:
-                            result = await fn(**fn_args) if fn else f"未知工具: {fn_name}"
-                    except Exception as _te:
-                        result = f"[工具执行失败] {fn_name}: {_te}"
-                        logger.warning(f"工具 {fn_name} 执行异常，已回灌模型: {_te}")
+                # 本轮是否含日报/求职报告工具（它们走模板渲染分支直接返回，需串行处理）
+                _has_report = any(
+                    tc["function"]["name"] in ("ai_daily_report", "ai_job_report")
+                    for tc in msg["tool_calls"]
+                )
 
-                    # 日报走模板渲染分支：结构化数据 -> HTML，直接返回，跳过 LLM 二次加工
-                    if fn_name in ("ai_daily_report", "ai_job_report") and isinstance(result, dict):
-                        if result.get("error"):
-                            history.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result.get("error"))})
-                            continue
+                if _has_report:
+                    # 日报分支：保留原串行逻辑（结构化数据 -> HTML 直接返回，跳过 LLM 二次加工）
+                    for tc in msg["tool_calls"]:
+                        fn_name = tc["function"]["name"]
                         try:
-                            import report_html
-                            text, html = report_html.render_report_html(result, direction)
-                            _save_report("job" if fn_name == "ai_job_report" else "daily", result, html)
-                            save_message(session_id, "assistant", text)
-                            return {"text": text, "html": html}
-                        except Exception as render_err:
-                            history.append({"role": "tool", "tool_call_id": tc["id"], "content": f"日报渲染失败: {render_err}"})
-                            continue
+                            fn_args = json.loads(tc["function"]["arguments"])
+                        except json.JSONDecodeError:
+                            fn_args = {}
+                        fn = TOOL_MAP.get(fn_name)
+                        _t0 = time.perf_counter()
+                        result, _status, _err = await _execute_tool_with_retry(fn_name, fn, fn_args, direction)
+                        _save_trace(session_id, fn_name, fn_args, result, _status, _err,
+                                    (time.perf_counter() - _t0) * 1000)
 
-                    if fn_name not in ("ai_daily_report", "ai_job_report"):
+                        if fn_name in ("ai_daily_report", "ai_job_report") and isinstance(result, dict):
+                            if result.get("error"):
+                                history.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result.get("error"))})
+                                continue
+                            try:
+                                import report_html
+                                text, html = report_html.render_report_html(result, direction)
+                                _save_report("job" if fn_name == "ai_job_report" else "daily", result, html)
+                                save_message(session_id, "assistant", text)
+                                return {"text": text, "html": html}
+                            except Exception as render_err:
+                                history.append({"role": "tool", "tool_call_id": tc["id"], "content": f"日报渲染失败: {render_err}"})
+                                continue
+
+                        if fn_name not in ("ai_daily_report", "ai_job_report"):
+                            save_message(session_id, "tool", str(result)[:500], tool_name=fn_name)
+                        history.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                else:
+                    # 普通工具：一轮内多个工具通常无相互依赖，并行执行（asyncio.gather），
+                    # 降低多信息源查询的整体延迟（StreamMA 流水线思想）。
+                    # gather 按传入顺序返回，天然保证 history 顺序与 msg["tool_calls"] 对齐。
+                    _results = await asyncio.gather(
+                        *[_run_one_tool(tc, session_id, direction) for tc in msg["tool_calls"]],
+                        return_exceptions=True,
+                    )
+                    # 关键：每个 tool_call 都必须补一条 tool 消息（成功或异常都要），
+                    # 否则 history 里的 tool_calls 缺少对应结果，上游 API 会直接 400。
+                    for _i, _item in enumerate(_results):
+                        tc = msg["tool_calls"][_i]
+                        fn_name = tc["function"]["name"]
+                        if isinstance(_item, BaseException):
+                            result = f"[工具异常] {fn_name}: {_item}"
+                            logger.warning(f"并行工具异常已隔离: {_item}")
+                        else:
+                            result = _item[1]
                         save_message(session_id, "tool", str(result)[:500], tool_name=fn_name)
-                    history.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                        history.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
                 payload["messages"] = history
                 _ok = False
@@ -1702,6 +2126,21 @@ async def process_chat(message: str, session_id: str = "default", direction: str
             reply = raw_content if raw_content else (reasoning if reasoning else "（模型未返回内容，请重试）")
             # 裁掉模型把思考过程混入 content 的开头文本
             reply = _strip_reasoning(reply)
+
+            # ── 自我诊断：本次任务若发生工具失败/显著超时，自动回放客观 trace 做根因定位 ──
+            try:
+                _diag_trigger = None
+                if _session_had_error(session_id):
+                    _diag_trigger = "工具执行失败"
+                elif _session_had_slow(session_id, SLOW_TRACE_MS):
+                    _diag_trigger = f"工具耗时超阈值（>{SLOW_TRACE_MS}ms）"
+                if _diag_trigger:
+                    _diag = await self_diagnose(session_id, _diag_trigger)
+                    if _diag:
+                        reply = reply + f"\n\n---\n🔍 自我诊断（基于客观 trace）\n{_diag}"
+            except Exception as _de:
+                logger.warning(f"自我诊断失败（不影响主回复）: {_de}")
+
             history.append({"role": "assistant", "content": reply})
 
             # 对话已落库（user 在开头存、assistant 在此存、tool 在循环里存）
@@ -1733,7 +2172,7 @@ async def _stream_tokens(cli, history, with_tools=False):
     """向 DeepSeek 发起流式请求，逐块 yield 文本增量。"""
     payload = {"model": MODEL, "messages": history, "max_tokens": 4096, "stream": True}
     if with_tools:
-        payload["tools"] = TOOLS
+        payload["tools"] = _build_effective_tools()
         payload["tool_choice"] = "auto"
     full_content = ""
     fallback_reasoning = ""
@@ -1763,6 +2202,78 @@ async def _stream_tokens(cli, history, with_tools=False):
     # 极端情况：整段 content 为空，退而用 reasoning_content 兜底
     if not full_content and fallback_reasoning:
         yield fallback_reasoning
+
+
+async def self_diagnose(session_id: str, trigger: str = "工具执行失败") -> str:
+    """加载最近 N 步客观 trace，喂给 LLM 做自我诊断（self-reflection + 可观测性）。
+    关键：给 LLM 的是「真实发生的 trace」（客观记录），不是它脑中的记忆，
+    从而绕开「模型对着自己的幻觉反思」的盲区。独立 LLM 调用、独立角色，不污染业务回复。"""
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT tool_name, tool_args, tool_result, status, error_msg, duration_ms "
+            "FROM traces WHERE session_id = ? ORDER BY id DESC LIMIT 10",
+            (session_id,),
+        ).fetchall()
+    if not rows:
+        return "没有找到 trace 记录，无法诊断。"
+
+    trace_text = "\n".join(
+        f"{i}. [{r['tool_name']}] status={r['status']} 耗时={r['duration_ms']:.0f}ms\n"
+        f"   入参: {r['tool_args']}\n"
+        f"   输出: {str(r['tool_result'])[:800]}\n"
+        f"   错误: {r['error_msg'] or '无'}"
+        for i, r in enumerate(reversed(rows), 1)
+    )
+
+    diag_prompt = f"""你是 Hermes 的自我诊断器。下面是本次任务**真实发生**的工具调用 trace（客观记录，不是模型自述）：
+
+{trace_text}
+
+触发诊断的原因：{trigger}
+
+请只基于上面的 trace 回答，分三点：
+1. 根因定位：哪一步出了问题？（工具失败 / 入参错误 / 逻辑走偏）
+2. 影响：这个错误会让最终回答哪里不可靠？
+3. 修复建议：具体改什么（一句话，可执行）。
+
+要求：只输出客观结论，不要编造 trace 里没有的细节；用中文。"""
+
+    try:
+        async with httpx.AsyncClient(timeout=120, verify=certifi.where()) as cli:
+            r = await cli.post(
+                f"{BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                json={"model": MODEL,
+                      "messages": [{"role": "user", "content": diag_prompt}],
+                      "max_tokens": 1024, "stream": False},
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"].get("content", "诊断失败：空回复")
+            return f"诊断 API 错误 ({r.status_code}): {r.text[:200]}"
+    except Exception as e:
+        return f"诊断失败: {e}"
+
+
+def _session_had_error(session_id: str, limit: int = 5) -> bool:
+    """判断最近 limit 条 trace 中是否有工具执行失败。"""
+    with get_db() as db:
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM (SELECT status FROM traces "
+            "WHERE session_id = ? ORDER BY id DESC LIMIT ?) WHERE status = 'error'",
+            (session_id, limit),
+        ).fetchone()
+    return (row["c"] if row else 0) > 0
+
+
+def _session_had_slow(session_id: str, threshold_ms: float, limit: int = 5) -> bool:
+    """判断最近 limit 条 trace 中是否有工具单次耗时超过阈值（毫秒）。"""
+    with get_db() as db:
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM (SELECT duration_ms FROM traces "
+            "WHERE session_id = ? ORDER BY id DESC LIMIT ?) WHERE duration_ms >= ?",
+            (session_id, limit, threshold_ms),
+        ).fetchone()
+    return (row["c"] if row else 0) > 0
 
 
 def _compress_tool_history(history):
@@ -1842,7 +2353,7 @@ async def stream_chat(message: str, session_id: str = "default", direction: str 
     async with httpx.AsyncClient(timeout=120, verify=certifi.where()) as cli:
         # 工具循环：最多 5 轮，确保最终回答前不再残留 tool_calls
         for _ in range(5):
-            probe = {"model": MODEL, "messages": history, "tools": TOOLS,
+            probe = {"model": MODEL, "messages": history, "tools": _build_effective_tools(),
                      "tool_choice": "auto", "max_tokens": 4096, "stream": False}
             _ok = False
             for _attempt in range(3):
@@ -1878,14 +2389,7 @@ async def stream_chat(message: str, session_id: str = "default", direction: str 
                 except json.JSONDecodeError:
                     fn_args = {}
                 fn = TOOL_MAP.get(fn_name)
-                try:
-                    if fn_name in ("ai_daily_report", "ai_job_report"):
-                        result = await fn(direction=direction) if fn else f"未知工具: {fn_name}"
-                    else:
-                        result = await fn(**fn_args) if fn else f"未知工具: {fn_name}"
-                except Exception as _te:
-                    result = f"[工具执行失败] {fn_name}: {_te}"
-                    logger.warning(f"工具 {fn_name} 执行异常，已回灌模型: {_te}")
+                result, _status, _err = await _execute_tool_with_retry(fn_name, fn, fn_args, direction)
 
                 if fn_name in ("ai_daily_report", "ai_job_report") and isinstance(result, dict):
                     if result.get("error"):
@@ -2070,6 +2574,55 @@ async def dashboard_report(report_id: int):
     return HTMLResponse(row["html"] or "<p>（无 HTML 内容）</p>")
 
 
+@app.get("/api/traces", dependencies=[Depends(require_auth)])
+async def traces_api(session_id: str = None, status: str = None,
+                     tool: str = None, limit: int = 200):
+    """可观测性：查询工具调用 trace，支持按 session_id / status / tool_name 过滤 + 汇总统计。"""
+    clauses, params = [], []
+    if session_id:
+        clauses.append("session_id = ?"); params.append(session_id)
+    if status:
+        clauses.append("status = ?"); params.append(status)
+    if tool:
+        clauses.append("tool_name = ?"); params.append(tool)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT id, session_id, tool_name, tool_args, tool_result, status, "
+            "error_msg, duration_ms, created_at FROM traces "
+            f"{where} ORDER BY id DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
+        recs = [dict(r) for r in rows]
+        agg = db.execute(
+            "SELECT COUNT(*) AS n, "
+            "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errs, "
+            "AVG(duration_ms) AS avg_ms, MAX(duration_ms) AS max_ms "
+            f"FROM traces {where}",
+            params,
+        ).fetchone()
+    return {
+        "count": len(recs),
+        "summary": {
+            "total": agg["n"] or 0,
+            "errors": agg["errs"] or 0,
+            "error_rate": round((agg["errs"] or 0) / (agg["n"] or 1), 3),
+            "avg_ms": round(agg["avg_ms"] or 0, 1),
+            "max_ms": round(agg["max_ms"] or 0, 1),
+        },
+        "traces": recs,
+    }
+
+
+@app.get("/traces", response_class=HTMLResponse)
+async def traces_page():
+    p = static_dir / "traces.html"
+    if not p.exists():
+        return HTMLResponse("<h1>可观测性 Trace</h1>")
+    html = p.read_text("utf-8").replace("__WEB_TOKEN__", WEB_TOKEN)
+    return HTMLResponse(html)
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_page():
     p = static_dir / "dashboard.html"
@@ -2115,6 +2668,7 @@ async def api_jobs(
     include_hidden: bool = False,
     only_region: bool = False,
     edu_filter: bool = False,
+    profile_focus: bool = False,
 ):
     """岗位列表。
 
@@ -2131,9 +2685,26 @@ async def api_jobs(
 
     prof_path = _P(__file__).parent / "job_sentinel" / "profile.json"
     profile = load_profile(prof_path)
-    # 仅当开关开启时才把画像的地区/学历门槛作为过滤条件，否则全量可见
+    # 仅当开关开启时才把画像的地区作为过滤条件，否则全量可见
     regions = profile.get("regions") if only_region else None
-    edu_thr = profile.get("edu_threshold") if (edu_filter and profile.get("edu_threshold") != "不限") else None
+    # 学历门槛：开关 ON 时按**画像当前值**过滤（本科可投 / 需硕士）；
+    # 画像为「不限」则不过滤（此时开关无害地保持 ON，前端会把按钮置灰提示）。
+    # 2026-09-02 修正：此前后端硬编码「本科可投」，画像里的学历门槛是死字段。
+    edu_thr = (profile.get("edu_threshold") or "不限") if edu_filter else None
+    if edu_thr == "不限":
+        edu_thr = None
+    # 最低薪资：画像 salary_min>0 时剔除可解析出月薪且低于门槛的岗（面议/空不剔除）
+    salary_min = int(profile.get("salary_min") or 0)
+    # 排除词：看板层硬过滤（此前只在扫描入库时生效，改了词已入库的岗不动）
+    exclude_kw = profile.get("exclude_keywords") or []
+    # 画像聚焦：开启后按画像的「求职方向 / 专业 / 招聘类型」软过滤岗位集
+    prof_focus = None
+    if profile_focus:
+        prof_focus = {
+            "directions": profile.get("directions") or [],
+            "major": profile.get("major") or [],
+            "recruit_type": profile.get("recruit_type") or [],
+        }
     with js_get_db(str(DB_PATH)) as c:
         jobs = get_jobs(c, {
             "status": status, "batch": batch, "city": city,
@@ -2143,6 +2714,9 @@ async def api_jobs(
             "include_hidden": include_hidden,
             "regions": regions,
             "edu_threshold": edu_thr,
+            "salary_min": salary_min,
+            "exclude_keywords": exclude_kw,
+            "profile_focus": bool(prof_focus), "_profile": prof_focus,
         })
     # 「N 天内截止」需按日期解析过滤，SQL 里 deadline 是混合格式文本做不了
     if urgent_days > 0:
@@ -2215,10 +2789,14 @@ async def api_jobs_rescore():
 @app.post("/api/jobs/{raw_hash}/status", dependencies=[Depends(require_auth)])
 async def api_job_status(raw_hash: str, request: Request):
     data = await request.json()
-    status = (data or {}).get("status", "新")
+    status = (data or {}).get("status", "")
     from job_sentinel.store import get_db as js_get_db, update_status
     with js_get_db(str(DB_PATH)) as c:
-        update_status(c, raw_hash, status)
+        if not update_status(c, raw_hash, status):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": f"非法状态: {status!r}"},
+            )
     return {"ok": True, "raw_hash": raw_hash, "status": status}
 
 
@@ -2272,16 +2850,12 @@ async def api_scan():
     """手动触发哨兵扫描：重抓各源（含国聘全国岗）并入库，返回统计。
 
     前端「扫岗位」按钮直连此接口，不走 /chat 的 LLM 路由（更快更稳）。
+    走 _scan_once：工作线程执行 + 服务端并发锁（409 拒绝并发扫描）。
     """
-    from job_sentinel.scan import scan_and_match
-    from pathlib import Path as _P
-    base = _P(__file__).parent
     try:
-        res = await scan_and_match(
-            db_path=str(DB_PATH),
-            profile_path=str(base / "job_sentinel" / "profile.json"),
-            seed_path=str(base / "job_sentinel" / "seed_jobs.json"),
-        )
+        res = await _scan_once()
+    except RuntimeError as e:  # 并发扫描
+        return JSONResponse(status_code=409, content={"ok": False, "error": str(e)})
     except Exception as e:  # noqa: BLE001
         logger.error(f"哨兵扫描失败: {e}")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
@@ -2351,6 +2925,7 @@ async def api_extension_apply(request: Request):
                     "UPDATE jobs SET title=?, url=?, match_reason=? WHERE raw_hash=?",
                     (title or "网申投递", url, note or "浏览器扩展网申记录", exist["raw_hash"]),
                 )
+                c.commit()  # update_status 只提交它自己的语句；这条 UPDATE 不提交会随连接回滚
                 return {"ok": True, "company": exist["company"], "matched": True,
                         "status": final, "job_url": url, "via": "dedup"}
         # ③ 新建：归一后是真实新公司 / 域名推断 / 兜底未知
@@ -2451,6 +3026,7 @@ async def api_profile_suggest(kw: str = ""):
 # Caspian 多渠道路由
 # ============================================================
 async def start_caspian():
+    global _caspian_client
     if not CASPIAN_API_KEY:
         print("⚠️ Caspian 未配置")
         return
@@ -2461,6 +3037,7 @@ async def start_caspian():
         client = CommClient()
         client.connect_email(display_name="Hermes")
         adapter = HermesCaspianAdapter(client, process_chat)
+        _caspian_client = client  # 供启动扫描推送等主动发信场景复用
         print("📧 Caspian Email 已连接")
 
         # ⚠️ 关键修复：Caspian SDK 全同步（listen / events / reply 均为普通 def）。
@@ -2533,6 +3110,8 @@ if __name__ == "__main__":
 ║  📱 手机连接:   http://{LAN_IP}:{PORT}              ║
 ║  📧 Email:     {'已连接' if CASPIAN_API_KEY else '未配置'}                       ║
 ║  🗄️ 记忆:      SQLite (hermes.db)                ║
+║  🔧 扩展Token: {EXT_TOKEN[:8]}…（完整值见下行 / 浏览器扩展设置里填）      ║
+║     {EXT_TOKEN}  ║
 ║                                                  ║
 ║  💡 对话 · 电脑操控 · 日报 · HN · arXiv · 搜索    ║
 ║  ⌨️  按 Ctrl+C 停止                                ║

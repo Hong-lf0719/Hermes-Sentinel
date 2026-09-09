@@ -14,6 +14,8 @@ sqlite-vec 等，对外接口不变。这体现「先用最简单正确的方案
 from __future__ import annotations
 
 import json
+import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -24,6 +26,8 @@ import numpy as np
 from .chunking import chunk_text, chunk_markdown
 from .embeddings import create_embedder, TfidfEmbedder
 from .exceptions import StoreError
+
+logger = logging.getLogger("hermes")
 
 
 class KnowledgeStore:
@@ -63,18 +67,46 @@ class KnowledgeStore:
             except Exception as e:
                 raise StoreError(f"向量索引损坏: {e}")
 
+        # 一致性校验：向量行数必须与 chunk 数严格相等。
+        # 不校验的后果比崩溃更糟——search 用 argsort 的下标去索引 self.chunks，
+        # 行数错位会「静默」返回张冠李戴的片段（答案看起来正常但内容对不上）。
+        # 不一致时丢弃旧向量、从 chunks 全量重建（数据本体在 meta.json，可无损恢复）。
+        n_chunks = len(self.chunks)
+        n_vecs = 0 if self.vectors is None else int(self.vectors.shape[0])
+        if n_chunks and n_vecs != n_chunks:
+            logger.warning(
+                f"[RAG] 索引与元数据不一致（向量 {n_vecs} 行 / 片段 {n_chunks} 条），正在重建索引"
+            )
+            try:
+                self._rebuild_and_persist()
+            except Exception as e:
+                raise StoreError(f"索引重建失败: {e}")
+
     def _save(self) -> None:
+        """原子落盘：先写向量、再写元数据，且都经临时文件 + os.replace 替换。
+
+        顺序与原子性都重要：meta.json 是「提交点」，若先写 meta 后写向量而中途
+        崩溃，重启就会读到「有 N 条片段但向量只有 M 行」的错位库；而直接
+        write_text 被打断则会留下半截 JSON，直接让知识库打不开。
+        """
+        if self.vectors is not None:
+            # 注意：np.save(路径) 若路径不以 .npy 结尾会自动追加 .npy，
+            # 导致临时文件实际叫 vectors.npy.tmp.npy、os.replace 找不到源文件。
+            # 传文件对象可绕过该行为。
+            tmp_vec = self.vec_path.with_name(self.vec_path.name + ".tmp")
+            with open(tmp_vec, "wb") as f:
+                np.save(f, self.vectors)
+            os.replace(tmp_vec, self.vec_path)
+
         data = {
             "docs": list(self.docs.values()),
             "chunks": self.chunks,
             "doc_seq": self._doc_seq,
             "chunk_seq": self._chunk_seq,
         }
-        self.meta_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), "utf-8"
-        )
-        if self.vectors is not None:
-            np.save(self.vec_path, self.vectors)
+        tmp_meta = self.meta_path.with_name(self.meta_path.name + ".tmp")
+        tmp_meta.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+        os.replace(tmp_meta, self.meta_path)
 
     # ---------------------------------------------------------------- 写入
     def add_text(

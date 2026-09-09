@@ -69,11 +69,14 @@ class HermesCaspianAdapter:
         :param message: Caspian SDK 的 Message 对象
         """
         trace_id = getattr(message, "id", "unknown")
-        sender = getattr(message, "sender", {})
+        sender = getattr(message, "sender", {}) or {}
         sender_address = (sender or {}).get("address", "unknown")
         platform = getattr(message, "platform", "unknown")
+        # text 可能为 None（SDK 边界情况）——放 try 外切片会直接崩掉整个 handler，
+        # 且异常被 run_coroutine_threadsafe 吞掉后完全静默。
+        text_head = (getattr(message, "text", "") or "")[:50]
 
-        logger.info(f"[TRACE:{trace_id}] 收到 {platform} 消息 from {sender_address}: {message.text[:50]}...")
+        logger.info(f"[TRACE:{trace_id}] 收到 {platform} 消息 from {sender_address}: {text_head}...")
 
         try:
             # Step 1: 输入验证

@@ -36,6 +36,7 @@ OFFICIAL_LINKS: dict[str, str] = {
     "腾讯": "https://join.qq.com/campus.html",
     "阿里": "https://talent.taotian.com",
     "京东": "https://campus.jd.com",
+    "京东方": "https://join.boe.com",
     # —— 金融 ——
     "兴业银行": "https://www.cib.com.cn",
     "中国银行": "https://www.boc.cn",
@@ -87,10 +88,12 @@ def resolve_url(company: str, raw_url: str = "", year: str = "2027") -> tuple[st
     """
     name = (company or "").strip()
 
-    # 1. 官方校招页（按包含匹配，兼容"小米武汉"→"小米"这类带后缀的公司名）
-    for key, link in OFFICIAL_LINKS.items():
-        if key in name:
-            return link, "官方校招页"
+    # 1. 官方校招页。取「最长命中键」：短键裸子串会误伤（"京东"命中"京东方"、
+    # "阿里"命中"阿里云"外的误配面），长键优先并要求命中位置不被更长公司名吸收。
+    hits = [(k, link) for k, link in OFFICIAL_LINKS.items() if k in name]
+    if hits:
+        hits.sort(key=lambda x: -len(x[0]))
+        return hits[0][1], "官方校招页"
 
     # 2. 源提供的有效详情链接
     if is_direct_link(raw_url):

@@ -20,11 +20,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
+import time
 
 import certifi
 from ..models import Job
 from .base import SourceAdapter
+
+logger = logging.getLogger(__name__)
 
 try:
     import httpx
@@ -52,6 +56,39 @@ CONCURRENCY = 10          # 详情并发数
 PAGE_SIZE = 50
 MAX_PAGE = 5              # 单个地区最多翻几页
 
+# ── 熔断器 ──────────────────────────────────────────────────
+# 站点挂掉时（实测过连续 502），若不熔断会对 DETAIL_LIMIT(230) 条简章
+# 逐个发请求、逐个失败 —— 既刷爆日志又白白消耗对方站点资源。
+# 连续失败达阈值即短路，冷却期内跳过该源，冷却结束后自动恢复探测。
+FAIL_THRESHOLD = 5        # 连续失败多少次后熔断
+COOLDOWN_SEC = 600        # 熔断冷却时长（秒）
+
+_fail_streak = 0
+_open_until = 0.0
+
+
+def _breaker_open() -> bool:
+    """熔断器是否处于断开（冷却）状态。"""
+    return time.time() < _open_until
+
+
+def _record_fail(where: str = "") -> None:
+    """记录一次失败；达阈值则断开熔断。"""
+    global _fail_streak, _open_until
+    _fail_streak += 1
+    if _fail_streak >= FAIL_THRESHOLD and not _breaker_open():
+        _open_until = time.time() + COOLDOWN_SEC
+        logger.warning(
+            f"[武大源] 连续 {_fail_streak} 次失败（{where}），熔断 {COOLDOWN_SEC}s，"
+            f"冷却期内跳过该源（避免对着挂掉的接口狂发上百个请求）")
+
+
+def _record_ok() -> None:
+    """成功一次即复位连续失败计数。"""
+    global _fail_streak, _open_until
+    _fail_streak = 0
+    _open_until = 0.0
+
 # 简章正文里这些域名是真正的网申入口（企业自建/第三方招聘表单）
 APPLY_HOST_HINTS = (
     "jsj.top", "wjx.cn", "wjx.top", "jinshuju", "zhaopin", "campus", "hr.",
@@ -70,12 +107,22 @@ def _pick_apply_url(content_html: str) -> str:
     """
     if not content_html:
         return ""
-    urls = re.findall(r'https?://[^\s\'"<>）)]{10,120}', content_html)
+    # 上限放宽到 500：旧值 120 会把带长 query 的网申链接（moka/wjx 常见几百字符）
+    # 从第 120 位「切断」，得到一个语法合法但实际打不开的残缺 URL —— 比找不到更糟。
+    urls = re.findall(r'https?://[^\s\'"<>）)]{10,500}', content_html)
     for u in urls:
         low = u.lower()
         if any(k in low for k in APPLY_HOST_HINTS):
             return u.rstrip("。，,.、")
     return ""
+
+
+_PROVINCES = (
+    "北京", "天津", "上海", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江",
+    "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南",
+    "广东", "海南", "四川", "贵州", "云南", "陕西", "甘肃", "青海", "台湾",
+    "内蒙古", "广西", "西藏", "宁夏", "新疆", "香港", "澳门",
+)
 
 
 def _clean_city(name: str) -> str:
@@ -84,7 +131,7 @@ def _clean_city(name: str) -> str:
     - 多城市逗号/顿号/斜杠拼接 -> 拆开逐个清洗再拼回（'武汉,广东省深圳' -> '武汉, 深圳'）
       保留多城市是因为 city_score 用子串匹配（'武汉' in city），拆开不丢命中，
       同时修掉之前“拼接城市没拆分”的脏数据。
-    - 剥离省/自治区/市辖区前缀（'湖北省武汉' -> '武汉'）
+    - 剥离省/自治区/市辖区前缀（'湖北省武汉' -> '武汉'、'湖北武汉洪山区' -> '武汉'）
     - 剥离市/区/县后缀（'北京海淀区' -> '北京'、'石家庄市' -> '石家庄'）
     """
     if not name:
@@ -97,8 +144,18 @@ def _clean_city(name: str) -> str:
             continue
         # 剥离前缀：省 / 自治区 / 市辖区
         p = re.sub(r"^.*?(省|自治区|市辖区)", "", p)
-        # 剥离后缀：市 / 区 / 县（含“北京海淀区”类 市+区 嵌套）
-        p = re.sub(r"(市|.{1,4}(区|县))$", "", p).strip()
+        # 「XX市…」取到第一个「市」为止：上海市浦东新区→上海、湖北武汉市洪山区→湖北武汉
+        m = p.find("市")
+        if m >= 2:
+            p = p[:m]
+        # 尾部区/县：剥「2字区县名+区/县」，至少保留 2 字（洪山区→洪山、北京海淀区→北京）
+        while p.endswith(("区", "县")) and len(p) > 3:
+            p = p[:-3] if len(p) >= 5 else p[:-2]
+        # 剥残留省份前缀（湖北武汉→武汉）；省份名单独出现时保留
+        for prov in _PROVINCES:
+            if p.startswith(prov) and len(p) > len(prov):
+                p = p[len(prov):]
+                break
         if not p:
             continue
         if p not in seen:
@@ -111,8 +168,15 @@ class WhuJobsSource(SourceAdapter):
     name = "武汉大学就业网"
 
     async def _token(self, cli) -> str:
-        r = await cli.get(f"{BASE}/f/ajaxHome/getToken")
-        return (r.json() or {}).get("data", "")
+        try:
+            r = await cli.get(f"{BASE}/f/ajaxHome/getToken")
+            if r.status_code >= 400:
+                _record_fail("getToken")
+                return ""
+            return (r.json() or {}).get("data", "")
+        except Exception:
+            _record_fail("getToken")
+            return ""
 
     async def _page(self, cli, token: str, page: int = 1,
                     city: str = "", keyword: str = "") -> tuple[list[dict], int]:
@@ -127,9 +191,14 @@ class WhuJobsSource(SourceAdapter):
                 f"{BASE}/f/recruitmentinfo/ajax_frontRecruitinfo",
                 headers={"token": token}, data=data,
             )
+            if r.status_code >= 400:
+                _record_fail("ajax_frontRecruitinfo")
+                return [], 1
             obj = (r.json() or {}).get("object") or {}
+            _record_ok()
             return obj.get("list") or [], int(obj.get("totalPage") or 1)
         except Exception:  # noqa: BLE001 - 单次失败不影响整体
+            _record_fail("ajax_frontRecruitinfo")
             return [], 1
 
     async def _collect_city(self, cli, token: str, code: str) -> list[dict]:
@@ -150,15 +219,23 @@ class WhuJobsSource(SourceAdapter):
         rid = item.get("id")
         if not rid:
             return []
+        # 熔断冷却中：直接短路，不再对挂掉的接口发请求
+        if _breaker_open():
+            return []
         try:
             r = await cli.post(
                 f"{BASE}/f/recruitmentinfo/ajax_show",
                 headers={"token": token},
                 data={"recruitmentId": rid},
             )
+            if r.status_code >= 400:
+                _record_fail("ajax_show")
+                return []
             info = ((r.json() or {}).get("object") or {}).get("recruitmentinfo") or {}
         except Exception:  # noqa: BLE001
+            _record_fail("ajax_show")
             return []
+        _record_ok()
 
         company = info.get("corporationName") or item.get("corporationName") or ""
         corp = info.get("corporationinfo") or {}
@@ -213,6 +290,10 @@ class WhuJobsSource(SourceAdapter):
 
     async def fetch(self, profile) -> list[Job]:  # noqa: D102
         if not HAS_HTTPX:
+            return []
+        # 熔断冷却中：整源跳过，一个请求都不发
+        if _breaker_open():
+            logger.info("[武大源] 熔断冷却中，本次扫描跳过该源")
             return []
 
         limits = httpx.Limits(max_connections=CONCURRENCY + 4)

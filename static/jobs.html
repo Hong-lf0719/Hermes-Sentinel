@@ -22,6 +22,7 @@
   .btn-scan{background:var(--acc);color:#04293a}
   .btn-set{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
   .btn-set.on{background:var(--acc);color:#04293a;border-color:var(--acc)}
+  .btn-set.dis{opacity:.45;cursor:not-allowed;text-decoration:line-through}
   .btn-refresh{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
   .btn-more{background:var(--card2);color:var(--sub);border:1px solid var(--line)}
   .btn-more.on{color:var(--acc);border-color:var(--acc)}
@@ -53,6 +54,8 @@
   .score{flex:0 0 auto;width:42px;height:42px;border-radius:10px;background:var(--card2);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;color:var(--acc)}
   .cmain{flex:1;min-width:0}
   .company{font-weight:700;font-size:15px}
+  /* 源站公司名在付费墙后 / 简章标题只有职位名 → 显式占位，不留空白（也不臆造公司名） */
+  .co-unk{font-weight:500;color:#8a94a6;font-style:italic}
   .title{color:var(--sub);font-size:13px;margin-top:1px}
   .batch{flex:0 0 auto;font-size:11px;padding:3px 8px;border-radius:20px;background:#0c4a6e;color:#7dd3fc;white-space:nowrap}
   .meta{display:flex;flex-wrap:wrap;gap:6px;margin:9px 0 0;color:var(--sub);font-size:12px}
@@ -151,8 +154,8 @@
 
 <div class="bar">
   <select id="f-tier" onchange="loadJobs()">
-    <option value="">全部分档</option>
-    <option value="值得投+" selected>✅ 值得投+ (≥60)</option>
+    <option value="" selected>全部分档</option>
+    <option value="值得投+">✅ 值得投+ (≥60)</option>
     <option value="优先投">🔥 优先投 (75+)</option>
     <option value="值得投">✅ 值得投 (60-74)</option>
     <option value="备选">🟡 备选 (45-59)</option>
@@ -165,7 +168,10 @@
   </select>
   <select id="f-source" onchange="loadJobs()"><option value="">全部来源</option></select>
   <button class="btn-set" id="f-urgent" onclick="toggleUrgent()">⏰ 7天内截止</button>
+  <button class="btn-set" id="f-region" onclick="toggleRegion()">📍 只看目标地区</button>
+  <button class="btn-set" id="f-pfocus" onclick="toggleProfileFocus()">🎯 按画像聚焦</button>
   <button class="btn-refresh" onclick="loadJobs()">刷新</button>
+  <button class="btn-refresh" onclick="rescore()">🔄 重算</button>
   <button class="btn-scan" onclick="scan()">扫岗位</button>
   <button class="btn-set" onclick="openSet()">⚙ 画像</button>
   <button class="btn-more" id="f-more" onclick="toggleMore()">更多筛选 ▾</button>
@@ -179,6 +185,7 @@
   <input id="f-city" type="text" placeholder="城市筛选" />
   <input id="f-score" type="number" placeholder="最低分" style="width:78px" />
   <button class="btn-set" id="f-real" onclick="toggleReal()">✓ 只看真实投递</button>
+  <button class="btn-set" id="f-edu" onclick="toggleEdu()">🎓 学历门槛</button>
 </div>
 
 <div class="hidden-bar" id="hiddenBar" style="display:none">
@@ -230,7 +237,7 @@
     </div>
 
     <div class="group">
-      <label>🎓 学历门槛（看板「仅本科可投」聚焦用）</label>
+      <label>🎓 学历门槛（决定看板「🎓」按钮按什么过滤）</label>
       <div class="chips" id="c-edu-thr"></div>
       <div class="desc" id="reach"></div>
     </div>
@@ -246,12 +253,14 @@
     </div>
 
     <div class="group">
-      <label>💰 薪资下限（0=不限）</label>
+      <label>💰 薪资下限（月薪 K，0=不限）</label>
       <input id="p-salary" type="number" placeholder="0" />
+      <div class="desc">低于该值的岗位直接从看板剔除（面议/未标薪资的岗位保留）</div>
     </div>
     <div class="group">
       <label>🚫 排除关键词（逗号分隔）</label>
       <input id="p-exclude" placeholder="销售, 土木" />
+      <div class="desc">命中公司名/岗位名/行业/专业的岗位立即从看板消失（含已入库岗位）</div>
     </div>
 
     <div class="foot">
@@ -267,19 +276,74 @@
 const STATUSES = ["新","已看","已投","笔试","面试","挂","OC"];
 let onlyReal = false;  // 只看真实投递（状态已推进 或 浏览器扩展主动投的）
 let urgentOnly = false;  // 只看 7 天内截止
-let onlyRegion = false;  // 只看目标地区（看板聚焦开关）
-let eduFilter = false;   // 仅本科可投（看板聚焦开关）
+let onlyRegion = true;   // 默认开：画像有目标地区则默认只显示目标地区（解决「没标北京却满屏北京」）
+let profileFocus = false;  // 按画像聚焦（求职方向/专业/招聘类型 硬过滤岗位集）
+let eduFilter = true;    // 默认开：自身本科则默认隐藏需硕士岗（看板聚焦开关）
 let includeHiddenOnce = false;  // 临时查看已隐藏岗位
+let lastCount = 0;              // 上一次列表条数（用于保存画像后显示"X → Y 岗"的变化反馈）
+// 开关/筛选持久化：避免「点完刷新又回到默认」造成的「像没用」错觉
+const LS_KEY = "hermes_job_filters_v1";
+function saveFilters(){
+  try{
+    localStorage.setItem(LS_KEY, JSON.stringify({
+      onlyRegion, profileFocus, urgentOnly, onlyReal, eduFilter,
+      tier: document.getElementById("f-tier").value,
+      sort: document.getElementById("f-sort").value,
+      source: document.getElementById("f-source").value,
+      batch: document.getElementById("f-batch").value,
+      status: document.getElementById("f-status").value,
+      ent: document.getElementById("f-ent").value,
+      exam: document.getElementById("f-exam").value,
+      city: document.getElementById("f-city").value,
+      score: document.getElementById("f-score").value,
+    }));
+  }catch(e){}
+}
+/* 返回 true 表示读到了用户上次的偏好（此时不应再套用「首次默认」） */
+function loadFilters(){
+  try{
+    const s = JSON.parse(localStorage.getItem(LS_KEY) || "null");
+    if(!s) return false;
+    onlyRegion=!!s.onlyRegion; profileFocus=!!s.profileFocus; urgentOnly=!!s.urgentOnly;
+    onlyReal=!!s.onlyReal; eduFilter=!!s.eduFilter;
+    const set=(id,v)=>{const e=document.getElementById(id); if(e&&v!=null)e.value=v;};
+    set("f-tier",s.tier); set("f-sort",s.sort); set("f-source",s.source);
+    set("f-batch",s.batch); set("f-status",s.status); set("f-ent",s.ent);
+    set("f-exam",s.exam); set("f-city",s.city); set("f-score",s.score);
+    return true;
+  }catch(e){ return false; }
+}
+function applyToggleClasses(){
+  document.getElementById("f-urgent").classList.toggle("on",urgentOnly);
+  document.getElementById("f-region").classList.toggle("on",onlyRegion);
+  document.getElementById("f-pfocus").classList.toggle("on",profileFocus);
+  document.getElementById("f-real").classList.toggle("on",onlyReal);
+  const eb=document.getElementById("f-edu"); if(eb) eb.classList.toggle("on",eduFilter);
+}
 let MY_REGIONS = [];     // 画像地区（用于卡片「外地」标识 / 三不中判断）
 let MY_EDU = "本科";     // 画像自身学历
 function toast(m){const t=document.getElementById("toast");t.textContent=m;t.classList.add("on");setTimeout(()=>t.classList.remove("on"),1800);}
 function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+/* 学历可达性分档：必须与后端 store._edu_bucket 完全同口径。
+   旧版前端只用 indexOf("硕士")，会把「本科及以上，硕士优先」「本科/硕士」
+   这类本科能投的岗误判为「够不着」，导致 ⚠三不中 标错。 */
+function eduBucket(e){
+  e=(e||"").replace(/\s/g,"");
+  if(e.indexOf("硕士")>=0||e.indexOf("研究生")>=0||e.indexOf("博士")>=0)
+    return e.indexOf("本科")>=0 ? "本科" : "硕士及以上";
+  if(e.indexOf("大专")>=0||e.indexOf("专科")>=0) return "大专";
+  if(e.indexOf("本科")>=0) return "本科";
+  if(e.indexOf("不限")>=0||e.indexOf("无学历")>=0) return "本科";
+  return "其他";
+}
 
 // 分档 → 分数区间（与后端 matcher.score_tier 保持一致）
 const TIER_RANGE={"优先投":[75,0],"值得投+":[60,0],"值得投":[60,74],"备选":[45,59],"观察":[0,44]};
 function tierOf(s){s=s||0;return s>=75?"优先投":(s>=60?"值得投":(s>=45?"备选":"观察"));}
 
 async function loadJobs(){
+  applyToggleClasses();  // 保证按钮高亮始终与状态变量一致
   const b=document.getElementById("f-batch").value;
   const s=document.getElementById("f-status").value;
   const c=document.getElementById("f-city").value.trim();
@@ -295,6 +359,7 @@ async function loadJobs(){
   if(ent)q.set("enterprise_type",ent); if(exam)q.set("exam_free",exam);
   if(urgentOnly)q.set("urgent_days","7");
   if(onlyRegion)q.set("only_region","1");
+  if(profileFocus)q.set("profile_focus","1");
   if(eduFilter)q.set("edu_filter","1");
   if(includeHiddenOnce)q.set("include_hidden","1");
   // 分档与「最低分」并存时取更严的下限，避免互相打架
@@ -305,8 +370,10 @@ async function loadJobs(){
   const DELIV_STATES=["已投","笔试","面试","OC","挂"];
   if(DELIV_STATES.indexOf(s)>=0 || onlyReal) lo=0;
   if(lo)q.set("min_score",lo); if(hi)q.set("max_score",hi);
-  const r=await fetch("/api/jobs?"+q.toString());
+  const r=await fetch("/api/jobs?"+q.toString(), {cache:"no-store"});
+  saveFilters();  // 持久化当前开关+筛选，刷新后不丢
   const d=await r.json();
+  lastCount = (d.jobs?d.jobs.length:0);
   includeHiddenOnce=false;
   if(onlyReal) d.jobs=d.jobs.filter(j=>j.status!=='新'||(j.source||'').indexOf('浏览器扩展')>=0);
   const list=document.getElementById("list");
@@ -339,7 +406,7 @@ function cardHTML(j){
   const isOut = MY_REGIONS.length>0 && city && !MY_REGIONS.some(r=>r===city||city.indexOf(r)>=0||r.indexOf(city)>=0);
   // 三不中：地区不符 + 方向没中(理由无"方向:") + 学历门槛够不着(需硕士但自身本科)
   const dirHit = reason.indexOf("方向:")>=0;
-  const eduMiss = MY_EDU==="本科" && (j.education||"").indexOf("硕士")>=0;
+  const eduMiss = MY_EDU==="本科" && eduBucket(j.education)==="硕士及以上";
   const triMiss = isOut && !dirHit && eduMiss;
   const meta=[
     j.city&&`📍 ${esc(j.city)}`,
@@ -353,12 +420,14 @@ function cardHTML(j){
   const triTag = triMiss?`<em class="tag-tri" title="地区不符·方向不中·学历够不着，建议确认后标记不投">⚠ 三不中</em>`:"";
   const entTag = j.enterprise_type?`<em class="ent ent-${esc(j.enterprise_type)}">🏛 ${esc(j.enterprise_type)}</em>`:"";
   const examTag = j.exam_free==="免笔试"?`<em class="exam-free">⚡ 免笔试</em>`:(j.exam_free==="有笔试"?`<em class="exam-yes">📝 有笔试</em>`:"");
-  const sug=j.suggest?`<div class="suggest">💡 建议方向补全：${esc((j.suggest.industry||"")+" "+ (j.suggest.major||""))}<button class="mini-btn" onclick="adoptSuggest('${j.raw_hash}',this)">采用</button></div>`:"";
+  // 建议值放 data-* 属性传给「采用」：旧版从 DOM 文本正则反解（找「行业X 专业Y」），
+  // 而渲染文本里并没有这两个字 → 永远解析失败、按钮永远提示「无可采纳内容」。
+  const sug=j.suggest?`<div class="suggest" data-ind="${esc(j.suggest.industry||"")}" data-maj="${esc(j.suggest.major||"")}">💡 建议方向补全：${esc([j.suggest.industry,j.suggest.major].filter(Boolean).join(" / "))}<button class="mini-btn" onclick="adoptSuggest('${j.raw_hash}',this)">采用</button></div>`:"";
   return `<div class="card" data-hash="${j.raw_hash}">
     <div class="ctop">
       <div class="score ${scls}">${score}</div>
       <div class="cmain">
-        <div class="company">${esc(j.company)} <em class="tier ${tu.cls}">${tu.ico} ${tier}</em>${entTag}${examTag}${outTag}${triTag}</div>
+        <div class="company">${j.company?esc(j.company):'<span class="co-unk">公司未公开</span>'} <em class="tier ${tu.cls}">${tu.ico} ${tier}</em>${entTag}${examTag}${outTag}${triTag}</div>
         <div class="title">${esc(j.title)}</div>
       </div>
       <div class="batch">${esc(j.batch||"其他")}</div>
@@ -371,7 +440,8 @@ function cardHTML(j){
   </div>`;
 }
 async function setStatus(hash,status,btn){
-  await fetch("/api/jobs/"+hash+"/status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({status})});
+  const r=await fetch("/api/jobs/"+hash+"/status",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+AUTH_TOKEN},body:JSON.stringify({status})});
+  if(!r.ok){ toast("标记失败（"+r.status+"），请刷新重试"); return; }
   const grp=btn.parentElement; grp.querySelectorAll("button").forEach(b=>b.classList.remove("on"));
   btn.classList.add("on");
   toast("标记为："+status);
@@ -417,7 +487,10 @@ async function rescore(){
   try{
     const r=await fetch("/api/jobs/rescore",{method:"POST",headers:{"Authorization":"Bearer "+AUTH_TOKEN}});
     const d=await r.json();
-    if(d.ok) toast(`已重算 ${d.total} 条，其中 ${d.changed} 条分数变化`);
+    if(d.ok){
+      if(d.changed>0) toast(`已重算 ${d.total} 条，其中 ${d.changed} 条分数变化`);
+      else toast(`已重算 ${d.total} 条，分数无变化：你改的字段不影响匹配分；想改变可见岗位请开「只看目标地区」或「按画像聚焦」`);
+    }
     else toast("重算失败："+(d.error||"未知错误"));
   }catch(e){ toast("重算请求出错"); }
   rescoring=false;
@@ -430,13 +503,33 @@ function toggleUrgent(){
   loadJobs();
 }
 
-/* 加载画像的地区/学历，供卡片「外地」与「三不中」标识 */
+/* 加载画像的地区/学历，供卡片「外地」与「三不中」标识；
+   并同步「学历门槛」按钮文案 —— 让按钮说清它到底在按什么过滤 */
+let PROF_THRESHOLD = "不限";
+let PROF_DIRECTIONS = [];
 async function loadProfileLite(){
   try{
-    const p=await (await fetch("/api/profile")).json();
+    const p=await (await fetch("/api/profile",{cache:"no-store"})).json();
     MY_REGIONS = p.regions||[];
     MY_EDU = p.education||"本科";
+    PROF_THRESHOLD = p.edu_threshold||"不限";
+    PROF_DIRECTIONS = p.directions||[];
   }catch(e){}
+  syncEduBtn();
+}
+/* 按钮文案随画像学历门槛变化；画像为「不限」时置灰并说明，
+   避免「点了开关却毫无变化」（后端此时不过滤）造成的困惑 */
+function syncEduBtn(){
+  const eb=document.getElementById("f-edu"); if(!eb) return;
+  if(PROF_THRESHOLD==="不限"){
+    eb.textContent="🎓 学历门槛(未设)"; eb.classList.add("dis"); eb.classList.remove("on");
+    eb.title="画像未设学历门槛，此开关暂不生效。在「⚙ 画像」里选「本科可投」后可用。";
+    eduFilter=false;
+  }else{
+    eb.textContent = PROF_THRESHOLD==="需硕士" ? "🎓 仅硕士" : "🎓 仅本科可投";
+    eb.classList.remove("dis");
+    eb.title="按画像学历门槛过滤："+PROF_THRESHOLD;
+  }
 }
 
 function toggleRegion(){
@@ -444,7 +537,16 @@ function toggleRegion(){
   document.getElementById("f-region").classList.toggle("on",onlyRegion);
   loadJobs();
 }
+function toggleProfileFocus(){
+  profileFocus=!profileFocus;
+  document.getElementById("f-pfocus").classList.toggle("on",profileFocus);
+  loadJobs();
+}
 function toggleEdu(){
+  if(PROF_THRESHOLD==="不限"){
+    toast("画像未设学历门槛：请在「⚙ 画像」里选「本科可投」或「需硕士」");
+    return;   // 后端此时不过滤，点了也不会变 → 直接说明，避免"点了没反应"
+  }
   eduFilter=!eduFilter;
   document.getElementById("f-edu").classList.toggle("on",eduFilter);
   loadJobs();
@@ -452,12 +554,13 @@ function toggleEdu(){
 
 /* 采纳补全建议：写回行业/专业并立即重算该岗 */
 async function adoptSuggest(hash,btn){
-  const card=btn.closest(".card");
+  // 直接读渲染时写入的 data-* 属性，不再从展示文本反向正则（那样一改文案就失效）
+  const box=btn.closest(".suggest");
   const sug={};
-  const txt=card.querySelector(".suggest").textContent||"";
-  // 从「建议方向补全：行业X 专业Y」粗取（后端只补空字段，安全）
-  const m=txt.match(/行业([^ ]+)\s*专业(.+)/);
-  if(m){ sug.industry=m[1].trim(); sug.major=m[2].trim(); }
+  if(box){
+    if(box.dataset.ind) sug.industry=box.dataset.ind.trim();
+    if(box.dataset.maj) sug.major=box.dataset.maj.trim();
+  }
   if(!sug.industry && !sug.major){ toast("无可采纳内容"); return; }
   btn.disabled=true; btn.textContent="采纳中…";
   try{
@@ -515,8 +618,8 @@ const EDU_RANK={"大专":1,"本科":2,"硕士":3,"博士":4};
 async function openSet(){
   try{
     const [pr,op]=await Promise.all([
-      fetch("/api/profile").then(r=>r.json()),
-      fetch("/api/profile/options").then(r=>r.json()),
+      fetch("/api/profile", {cache:"no-store"}).then(r=>r.json()),
+      fetch("/api/profile/options", {cache:"no-store"}).then(r=>r.json()),
     ]);
     PROF=pr||{}; OPTS=op||{};
     if(!PROF.regions)PROF.regions=[];
@@ -635,7 +738,7 @@ async function onMajorPick(){
 /* 学历门槛 × 可达机会（按 education 文本估算；985/211 数据源暂无） */
 function updateReach(){
   const bd=OPTS.edu_breakdown||{};
-  const total=Object.values(bd).reduce((a,b)=>a+b,0)||0;
+  const labeled=Object.values(bd).reduce((a,b)=>a+b,0)||0;
   const myEdu=PROF.education||"本科";
   const rankOf={"大专":1,"本科":2,"硕士及以上":3,"其他":2};
   const myRank=rankOf[myEdu]||2;
@@ -645,11 +748,19 @@ function updateReach(){
   }
   const thr=PROF.edu_threshold||"不限";
   const el=document.getElementById("reach");
-  // 学历门槛按 education 文本推断可达性（实测 95% 本科可投；985/211 数据源暂无）
-  let line = `本科视角可投 <b>${reach}</b> / 共 ${total} 个岗位（按现有学历标注估算）`;
+  let line = `本科视角可投 <b>${reach}</b> 个（基于 ${labeled} 条有学历标注的岗）`;
   if(thr==="本科可投") line += `；勾选「仅本科可投」后将隐藏 <b>${bd["硕士及以上"]||0}</b> 个需硕士岗`;
   if(thr==="需硕士") line += `；勾选「仅硕士」后只看 <b>${bd["硕士及以上"]||0}</b> 个岗位`;
-  el.innerHTML = line + `。<br><span class="desc">注：岗位库无 985/211 细分标注，院校维度按学历层次估算，更具真实区分度</span>`;
+  line += `。<br><span class="desc">注：岗位库无 985/211 细分标注；reach 按有学历标注的岗估算，其余岗位学历未抓取</span>`;
+  el.innerHTML = line;
+  // 用全库真实总数对齐看板（异步补齐，不阻塞渲染）
+  fetch("/api/jobs?min_score=0").then(r=>r.json()).then(d=>{
+    const total=d.count||0;
+    el.innerHTML = `本科视角可投 <b>${reach}</b> / 全库共 <b>${total}</b> 岗（其中 ${labeled} 条有学历标注，reach 据此估算）`
+      + (thr==="本科可投"? `；勾选「仅本科可投」后将隐藏 <b>${bd["硕士及以上"]||0}</b> 个需硕士岗`:"")
+      + (thr==="需硕士"? `；勾选「仅硕士」后只看 <b>${bd["硕士及以上"]||0}</b> 个岗位`:"")
+      + `。<br><span class="desc">注：岗位库无 985/211 细分标注；reach 按有学历标注的岗估算，其余岗位学历未抓取</span>`;
+  }).catch(()=>{});
 }
 function closeSet(){document.getElementById("mask").classList.remove("on");}
 function splitCSV(s){return (s||"").split(/[,，]/).map(x=>x.trim()).filter(Boolean);}
@@ -671,9 +782,44 @@ async function saveSet(){
     salary_min:Number(document.getElementById("p-salary").value||0),
     exclude_keywords:splitCSV(document.getElementById("p-exclude").value),
   };
-  await fetch("/api/profile",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(p)});
+  // 关键修复：POST /api/profile 需要鉴权（require_auth），此前漏带
+  // Authorization 头 → 服务端返回 401，保存静默失败，画像永远记不住。
+  // 现在补上 Bearer 令牌，并显式检查响应状态，失败立即提示而非假装成功。
+  try {
+    const r = await fetch("/api/profile", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "Authorization": "Bearer " + AUTH_TOKEN},
+      body: JSON.stringify(p),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+  } catch (e) {
+    toast("画像保存失败：" + e.message + "（未保存到磁盘）");
+    return;  // 保存失败则不要继续重算/刷新，避免误以为已生效
+  }
   closeSet(); toast("画像已保存，重算中…");
-  await rescore(); await loadJobs();
+  // 保存后自动聚焦：让岗位集随画像即时变化（不只是重排分数）
+  // ① 设了目标地区 → 开启「只看目标地区」
+  if(PROF.regions && PROF.regions.length){
+    onlyRegion=true;
+    const rb=document.getElementById("f-region"); if(rb) rb.classList.add("on");
+  } else {
+    onlyRegion=false;
+    const rb=document.getElementById("f-region"); if(rb) rb.classList.remove("on");
+  }
+  // ② 设了求职方向/专业/招聘类型 → 开启「按画像聚焦」
+  const hasFocus = !!(PROF.directions && PROF.directions.length)
+                || !!(PROF.major && PROF.major.length)
+                || !!(PROF.recruit_type && PROF.recruit_type.length);
+  profileFocus = !!hasFocus;
+  const pb=document.getElementById("f-pfocus"); if(pb) pb.classList.toggle("on",profileFocus);
+  // 同步卡片「外地」标识用的地区集合，避免改完后短暂错位
+  MY_REGIONS = PROF.regions||[];
+  PROF_THRESHOLD = PROF.edu_threshold||"不限";
+  syncEduBtn();
+  const before = lastCount;
+  await rescore();               // 内部已重新拉取列表
+  // 显式告知变化：此前改完画像只弹「重算中」，用户看不到任何差异，以为没生效
+  toast(`画像已生效：可见岗位 ${before} → ${lastCount} 条`);
 }
 
 /* 投递进度看板：从数据库自动汇总各状态数量（每次标记/刷新都重算），点胶囊即按状态筛选 */
@@ -719,9 +865,24 @@ function toggleReal(){
   document.getElementById("f-real").classList.toggle("on",onlyReal);
   loadJobs();
 }
-loadJobs();
-loadProfileLite();
-loadHiddenCount();
+/* 页面初始化：先读画像 → 再决定「首次默认开关」→ 最后拉岗位。
+   顺序很关键：若先 loadJobs 再读画像，会先闪一屏全量岗再过滤，且多打一次接口。
+   「首次默认」只在 localStorage 无记录时套用一次，之后完全尊重用户的开关选择。 */
+async function initPage(){
+  const hadPrefs = loadFilters();
+  await loadProfileLite();
+  if(!hadPrefs){
+    if((PROF_DIRECTIONS||[]).length) profileFocus = true;   // 画像有方向 → 默认聚焦
+    onlyRegion = (MY_REGIONS||[]).length > 0;               // 有目标地区 → 默认只看目标地区
+    eduFilter  = PROF_THRESHOLD !== "不限";                  // 有学历门槛 → 默认按门槛过滤
+    saveFilters();
+  }
+  applyToggleClasses();
+  await loadJobs();
+  loadHiddenCount();
+  if(!hadPrefs && profileFocus) toast("已按你的画像自动聚焦（点开关可关闭）");
+}
+initPage();
 </script>
 </body>
 </html>

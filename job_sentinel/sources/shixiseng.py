@@ -15,7 +15,10 @@ import asyncio
 import re
 from html import unescape
 
-import httpx
+try:
+    import httpx
+except ImportError:  # 缺依赖时静默降级（与其它源一致），不让整个 sources 注册表炸掉
+    httpx = None
 
 try:
     import certifi
@@ -24,6 +27,7 @@ except Exception:  # pragma: no cover
     _VERIFY = True
 
 from ..models import Job
+from .base import SourceAdapter
 
 BASE = "https://www.shixiseng.com"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -109,7 +113,19 @@ def _is_foreign(company: str, chunk: str) -> bool:
         return True
     if not company:
         return False
-    return any(h.lower() in company.lower() for h in _FOREIGN_HINTS)
+    # 英文短键按词边界匹配：裸子串会让 "GE" 命中 LenovE Group、"EY" 命中 SurveY、"现代" 命中 XX现代化
+    low = company.lower()
+    for h in _FOREIGN_HINTS:
+        hl = h.lower()
+        if hl.isascii():
+            if re.search(rf"(?<![a-z0-9]){re.escape(hl)}(?![a-z0-9])", low):
+                return True
+        elif h in ("现代",):  # 常用中文词，必须带后缀才算（现代汽车/现代集团）
+            if "现代汽车" in company or "现代集团" in company:
+                return True
+        elif h in company:
+            return True
+    return False
 
 
 def _parse_cards(html: str) -> list[Job]:
@@ -146,7 +162,7 @@ def _parse_cards(html: str) -> list[Job]:
     return jobs
 
 
-class ShixisengSource:
+class ShixisengSource(SourceAdapter):
     name = "实习僧"
 
     async def fetch(self, profile: dict) -> list[Job]:

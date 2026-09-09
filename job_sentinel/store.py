@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .models import Job, VALID_STATUS
+from .matcher import (direction_match, recruit_type_score, canon_major, _norm,
+                      split_cities)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -112,22 +114,6 @@ def get_jobs(c, filters: dict | None = None) -> list[Job]:
     if not filters.get("include_hidden"):
         sql += " AND (user_hidden IS NULL OR user_hidden=0)"
 
-    rows = c.execute(sql, args).fetchall()
-    jobs = [Job.from_dict(dict(r)) for r in rows]
-
-    # —— 看板层语义过滤（需模糊文本匹配 / 画像上下文，SQL 不便做）——
-    # 地区聚焦：仅保留命中画像地区的岗位（「只看目标地区」开关触发）
-    regions = filters.get("regions")
-    if regions:
-        jobs = [j for j in jobs if (j.city or "").strip()
-                and any((r in j.city or j.city in r) for r in regions)]
-    # 学历门槛：按 education 文本推断可达性档位过滤
-    edu_thr = filters.get("edu_threshold")
-    if edu_thr == "本科可投":
-        jobs = [j for j in jobs if _edu_bucket(j.education) != "硕士及以上"]
-    elif edu_thr == "需硕士":
-        jobs = [j for j in jobs if _edu_bucket(j.education) == "硕士及以上"]
-
     # 排序可切换：默认按匹配分，也支持「截止日最近优先」「最新发现优先」
     # deadline 是混合格式文本（92% 是 ISO '2026-09-01'，其余为 '以官网为准' 等），
     # 分三组排：① 未过期的真实日期（越近越前）② 无法判断的 ③ 已过期沉底
@@ -148,17 +134,52 @@ def get_jobs(c, filters: dict | None = None) -> list[Job]:
     jobs = [Job.from_dict(dict(r)) for r in rows]
 
     # —— 看板层语义过滤（需模糊文本匹配 / 画像上下文，SQL 不便做）——
-    # 地区聚焦：仅保留命中画像地区的岗位（「只看目标地区」开关触发）
+    # 地区聚焦：仅保留命中画像地区的岗位（「只看目标地区」开关触发）。
+    # 城市未标注的岗保留（仅十余条，宁可多看一眼也不静默丢岗）。
     regions = filters.get("regions")
     if regions:
-        jobs = [j for j in jobs if (j.city or "").strip()
-                and any((r in j.city or j.city in r) for r in regions)]
-    # 学历门槛：按 education 文本推断可达性档位过滤
+        def _region_ok(j: Job) -> bool:
+            city = (j.city or "").strip()
+            if not city:
+                return True          # 未知地区：保留
+            parts = split_cities(city)
+            if not parts:
+                return True
+            return any(any((r in p or p in r) for r in regions) for p in parts)
+        jobs = [j for j in jobs if _region_ok(j)]
+
+    # 学历门槛：按 education 文本推断可达性档位过滤。
+    # 阈值取自画像 edu_threshold（本科可投 / 需硕士 / 不限），
+    # 2026-09-02 修正：此前后端硬编码「本科可投」，画像里改门槛毫无效果。
     edu_thr = filters.get("edu_threshold")
     if edu_thr == "本科可投":
         jobs = [j for j in jobs if _edu_bucket(j.education) != "硕士及以上"]
     elif edu_thr == "需硕士":
         jobs = [j for j in jobs if _edu_bucket(j.education) == "硕士及以上"]
+    # 薪资门槛：能解析出月薪 K 且低于画像 salary_min 的岗剔除（面议/空不剔除）
+    smin = filters.get("salary_min") or 0
+    if smin > 0:
+        from .matcher import salary_k
+        kept = []
+        for j in jobs:
+            k, _ = salary_k(j.salary or "")
+            if k is not None and k < smin:
+                continue
+            kept.append(j)
+        jobs = kept
+    # 排除词：看板层硬过滤。此前 exclude_keywords 只在扫描入库的 hard_filter 生效，
+    # 用户改排除词后已入库的岗位一个不动 —— 「改了画像却没变化」的硬伤。
+    excl = [e for e in (filters.get("exclude_keywords") or []) if e]
+    if excl:
+        def _not_excluded(j: Job) -> bool:
+            blob = _norm(f"{j.company or ''} {j.title or ''} {j.industry or ''} {j.major or ''}")
+            return not any(_norm(e) in blob for e in excl)
+        jobs = [j for j in jobs if _not_excluded(j)]
+    # 画像聚焦：仅保留命中用户「求职方向 / 专业 / 招聘类型」的岗（软过滤，
+    # 信号缺失的岗保留，避免误伤未抓到 JD 的岗）。改画像后开启即让岗位集随画像变化。
+    if filters.get("profile_focus"):
+        subset = filters.get("_profile") or {}
+        jobs = [j for j in jobs if _job_profile_relevant(j, subset)]
     return jobs
 
 
@@ -198,6 +219,42 @@ def _edu_bucket(e: str) -> str:
     if "不限" in e or "无学历" in e:
         return "本科"
     return "其他"
+
+
+def _job_profile_relevant(job: "Job", subset: dict) -> bool:
+    """画像聚焦软过滤：岗位是否命中用户任一圈选维度（方向 / 专业 / 招聘类型）。
+
+    信号缺失（标题 / 行业 / 专业皆空）的岗一律保留——避免误伤未抓到 JD 的岗。
+    其余岗需命中至少一个维度才保留，使「改画像」能真正改变可见岗位集，
+    而不只是重排匹配分。
+    """
+    title = (job.title or "").strip()
+    industry = (job.industry or "").strip()
+    major = (job.major or "").strip()
+    if not (title or industry or major):
+        return True  # 无信号不惩罚
+
+    # 求职方向：复用 matcher.direction_match，命中即相关
+    dirs = subset.get("directions") or []
+    if dirs and direction_match(job, {"directions": dirs})[1]:
+        return True
+
+    # 专业：canonical 精确命中 或 文本包含
+    majors = subset.get("major") or []
+    if majors:
+        mset = {canon_major(m) for m in majors}
+        if canon_major(major) in mset:
+            return True
+        blob = _norm(f"{title} {industry} {major}")
+        if any(_norm(m) in blob for m in majors):
+            return True
+
+    # 招聘类型：校招 / 实习等（学生优先），命中即相关
+    rts = subset.get("recruit_type") or []
+    if rts and recruit_type_score(job, {"recruit_type": rts})[1]:
+        return True
+
+    return False
 
 
 def get_profile_options(c) -> dict:
@@ -283,11 +340,13 @@ def get_profile_options(c) -> dict:
     }
 
 
-def update_status(c, raw_hash: str, status: str):
+def update_status(c, raw_hash: str, status: str) -> bool:
+    """回写投递状态。非法状态拒绝写入（不静默重置为「新」，否则畸形请求能把 OC 打回「新」）。"""
     if status not in VALID_STATUS:
-        status = "新"
+        return False
     c.execute("UPDATE jobs SET status=? WHERE raw_hash=?", (status, raw_hash))
     c.commit()
+    return True
 
 
 def set_hidden(c, raw_hash: str, hidden: bool):
@@ -324,7 +383,10 @@ def prune_invalid(c, keep_fn) -> int:
     """
     protected = ("已投", "笔试", "面试", "挂", "OC")
     removed = 0
-    rows = c.execute("SELECT * FROM jobs WHERE status NOT IN (?,?,?,?,?)", protected).fetchall()
+    # user_hidden=0：「标记不投」是看板过滤（非删除），清理不得触碰
+    rows = c.execute(
+        "SELECT * FROM jobs WHERE status NOT IN (?,?,?,?,?) AND user_hidden=0", protected
+    ).fetchall()
     for r in rows:
         job = Job.from_dict(dict(r))
         if not keep_fn(job):

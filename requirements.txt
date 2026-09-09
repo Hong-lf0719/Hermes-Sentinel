@@ -8,3 +8,6 @@ caspian-sdk>=0.5.0
 beautifulsoup4>=4.12.0
 json5>=0.9.0
 certifi>=2023.7.22
+# 必须锁 <2：mcp 2.x 把 FastMCP 改名为 MCPServer，本项目用 v1 API，
+# 装到 2.x 会导致 import 失败 → MCP 工具静默降级（不报错，最难排查的一类故障）
+mcp>=1.2.0,<2

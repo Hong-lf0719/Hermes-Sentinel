@@ -135,6 +135,32 @@ def _build_company_pool(db_path: str) -> list[str]:
         return []
 
 
+def canon_company(s: str) -> str:
+    """强归一键：全角转半角、去空白/连接符、去括号组、剥法律与集团后缀。
+
+    专门解决「XX有限公司」vs「XX有限责任公司」双向子串都断开的漏配 ——
+    两个口径强归一后相等即视为同一家公司。只用于比较，不改变展示名。
+    """
+    if not s:
+        return ""
+    t = s.strip().lower()
+    # 全角 (FF01-FF5E) → 半角
+    t = "".join(chr(ord(ch) - 0xFEE0) if 0xFF01 <= ord(ch) <= 0xFF5E else ch for ch in t)
+    t = re.sub(r"\([^)]*\)|（[^）]*）", "", t)     # 连内容去掉括号组：(集团)/(中国)
+    t = re.sub(r"[\s·・\-—_\[\]【】]", "", t)
+    # 循环剥尾缀（「XX股份有限公司」「XX集团有限责任公司」等叠后缀）
+    changed = True
+    while changed and t:
+        changed = False
+        for suf in ("股份有限公司", "有限责任公司", "有限公司", "控股集团",
+                    "集团公司", "集团", "公司"):
+            if t.endswith(suf) and len(t) > len(suf):
+                t = t[: -len(suf)]
+                changed = True
+                break
+    return t
+
+
 def match_company(raw: str, pool: list[str]) -> tuple[str, float]:
     """在库公司池里找最像 raw 的。返回 (库内公司名, 置信度)。"""
     if not raw:
@@ -157,6 +183,13 @@ def match_company(raw: str, pool: list[str]) -> tuple[str, float]:
                 best, best_score = cand, score
     if best:
         return best, round(best_score, 2)
+    # 1.5) 强归一兜底：剥掉法律后缀/全角差异后相等的，视为同一家公司
+    #      （「XX有限公司」↔「XX有限责任公司」双向子串都不连续，走到这里才接得住）
+    rc = canon_company(r)
+    if rc:
+        for cand in pool:
+            if cand and canon_company(cand) == rc:
+                return cand, 0.95
     # 2) 退回别名匹配
     for alias, canon in COMPANY_ALIASES.items():
         if r == alias or r in canon or canon in r:
@@ -287,14 +320,24 @@ def find_extension_row(c, companies: list[str]):
 
 
 def _extract_company_before(before: str, pool: list[str]) -> str:
-    """在状态词『之前』的文本里找公司：取最后出现的（最靠近状态词，避免串到隔壁公司）。"""
+    """在状态词『之前』的文本里找公司：取文本中最后出现的（最靠近状态词）。
+
+    按「文本位置」比较而非候选列表迭代序 —— 盘点邮件（美团…字节跳动…[状态词]）
+    里迭代序会按 pool 字典序误选，写错公司行。
+    """
     candidates = list(pool) + list(COMPANY_ALIASES.keys()) + list(COMPANY_ALIASES.values())
-    last_hit = ""
+    best, best_pos = "", -1
     for cand in candidates:
-        if cand and cand in before:
-            last_hit = cand  # 后续命中覆盖，最终是最后一个（最靠近状态词）
-    if last_hit:
-        return last_hit
+        if not cand:
+            continue
+        p = before.rfind(cand)
+        if p < 0:
+            continue
+        # 位置更靠后 = 更靠近状态词；同位置取更长名（「字节跳动」优先于「字节」）
+        if p > best_pos or (p == best_pos and len(cand) > len(best)):
+            best, best_pos = cand, p
+    if best:
+        return best
     m = re.search(
         r"(?:投递的|来自|您向|向)\s*([一-龥A-Za-z·]{2,20}?)\s*(?:的|公司)?\s*(?:岗位|职位|简历|校招|秋招|网申)",
         before,
@@ -323,9 +366,15 @@ def set_db_path(db_path: str):
 
 
 def _advance_ok(current: str, new: str) -> bool:
-    """漏斗只前进（挂可覆盖任意前置态）。"""
+    """漏斗只前进（挂可覆盖任意前置态）。
+
+    「挂」是终态：迟到的投递确认邮件（挂=-1 之后到达的 已投=2）不得把状态复活。
+    真标错了需要纠正时走看板手动改（手动路径不经本守卫）。
+    """
     if new == "挂":
         return True
+    if current == "挂":
+        return False
     cur = STATUS_RANK.get(current, 0)
     nv = STATUS_RANK.get(new, 0)
     return nv > cur
@@ -370,7 +419,10 @@ def apply_events(events: list[DeliveryEvent], db_path: str) -> dict:
             if not rows:
                 not_found.append(e.company)
                 continue
-            target = rows[0]
+            # 一司多岗：优先更新已进投递漏斗的那行（用户实际投的是它），
+            # 多行都在漏斗时取推进最深的；都不在漏斗才退回最高分行。
+            in_funnel = [r for r in rows if r["status"] in ("已投", "笔试", "面试", "OC")]
+            target = max(in_funnel, key=lambda r: STATUS_RANK.get(r["status"], 0)) if in_funnel else rows[0]
             if _advance_ok(target["status"], e.status):
                 c.execute("UPDATE jobs SET status=? WHERE raw_hash=?", (e.status, target["raw_hash"]))
                 if e.company not in applied_map:

@@ -3,17 +3,22 @@
     "武汉",
     "孝感",
     "湖北",
-    "远程"
+    "远程",
+    "西安"
   ],
   "directions": [
-    "AI应用开发",
-    "数据开发",
-    "大模型应用",
-    "数据分析",
-    "后端开发"
+    "AI/大模型/算法",
+    "数据开发/分析",
+    "软件开发(后端)",
+    "前端开发"
+  ],
+  "recruit_type": [],
+  "nature": [],
+  "edu_threshold": "本科可投",
+  "major": [
+    "计算机类"
   ],
   "education": "本科",
-  "school_level": "双非可投",
   "batches": [
     "提前批",
     "秋招",
@@ -23,7 +28,5 @@
   ],
   "salary_min": 0,
   "exclude_keywords": [],
-  "prefer_companies": [],
-  "prefer_natures": [],
-  "updated_at": "2026-08-17 01:16"
+  "updated_at": "2026-09-02 04:31"
 }

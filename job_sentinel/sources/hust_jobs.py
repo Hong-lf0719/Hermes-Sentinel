@@ -64,6 +64,27 @@ def _list_url(page: int, jtype: str) -> str:
     return f"{BASE}/searchJob_{page}.do?type={jtype}&fbsj="
 
 
+# 标题格式「公司名 + 届别/招聘/宣讲…」：公司名取分隔词之前的头部。
+_COMPANY_CUT_RE = re.compile(
+    r"202\d|届|校园招聘|秋季?招聘|春季?招聘|招聘会|招聘简章|校招|宣讲|双选|专场|人才引进"
+)
+_NON_COMPANY_HEADS = {"关于", "通知", "招聘", "就业", "实习", "华中科技大学", "最新",
+                     "举办", "欢迎", "诚邀", "转发", "补贴", "项目", "创业"}
+
+
+def _company_from_title(title: str) -> str:
+    """从简章标题头部抽公司名；抽不出（或头部明显非公司）返回空串。"""
+    m = _COMPANY_CUT_RE.search(title or "")
+    if not m:
+        return ""
+    head = title[: m.start()].strip(" -—·:：()（）")
+    if len(head) < 2 or head.startswith("http"):
+        return ""
+    if any(head.startswith(h) for h in _NON_COMPANY_HEADS):
+        return ""
+    return head
+
+
 def _parse_list(html: str) -> list[tuple[str, str, str]]:
     """返回 [(detail_url, title, date_str)]。"""
     out: list[tuple[str, str, str]] = []
@@ -123,7 +144,7 @@ class HustJobsSource(SourceAdapter):
                             continue
                         seen.add(key)
                         jobs.append(Job(
-                            company="",                  # 列表仅给标题，公司名含在标题里；不瞎猜
+                            company=_company_from_title(title),  # 留空会致两家公司同名简章去重碰撞
                             title=title,
                             city="武汉",                 # 华科本校门户，发布地即武汉（地区聚焦用）
                             education="",                # 留空 → 打分时 suggest_fill 推「建议方向」
