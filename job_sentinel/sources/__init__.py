@@ -5,6 +5,8 @@
     - 武汉大学就业网（具体岗位+简章直链，质量最高）
     - 华中科技大学就业网（武汉本地校招补充，已实测 searchJob_N.do 静态分页可达）
     - 国聘网（全国央国企，按城市关键词抓校招、社招已拦截，不再降权）
+    - 湖北高校就业网 91wllm.cn（湖北 24365 平台，14 所高校站同模板，
+      含汉口学院/武汉工商学院等民办本科与独立学院 —— 补「双非可投」岗位池）
     - 2 个校招聚合站（公司级补充）、本地种子/目标公司池。
   * 浏览器扩展（用户已登录浏览器内运行，用用户自己的会话，服务端不存账号/cookie）：
     自动捕获牛客/BOSS/猎聘/51job/海投/应届生/各大厂校招官网/ATS 的「网申提交成功页」单次投递，
@@ -26,6 +28,8 @@ from .whu_jobs import WhuJobsSource
 from .hust_jobs import HustJobsSource
 from .guopin import GuopinSource
 from .shixiseng import ShixisengSource
+from .hbbys_91wllm import Hbbys91wllmSource
+from .isoftstone import IsotstoneSource
 
 
 def get_all_sources(seed_path=None) -> list[SourceAdapter]:
@@ -33,6 +37,10 @@ def get_all_sources(seed_path=None) -> list[SourceAdapter]:
 
     顺序即优先级：武大就业网给的是「具体岗位 + 简章直链」，质量最高排第一；
     华中科技大学就业网武汉本地校招补充排第二；国聘网全国覆盖补外地岗排第三；
+    湖北高校就业网（91wllm 多校矩阵）补「双非 / 民办本科可投」岗位排第四；
+    软通动力校招（JSON POST 接口，外包公司保底池，含实薪）排第五；
     聚合站只有公司级条目，作补充；种子源最后。
     """
-    return [WhuJobsSource(), HustJobsSource(), GuopinSource(), ShixisengSource(), ResumeMakerSource(), GivemeocSource(), SeedSource(seed_path)]
+    return [WhuJobsSource(), HustJobsSource(), GuopinSource(),
+            Hbbys91wllmSource(), IsotstoneSource(), ShixisengSource(),
+            ResumeMakerSource(), GivemeocSource(), SeedSource(seed_path)]

@@ -605,6 +605,25 @@ def _edu_ok(job_edu: str, user_edu: str) -> bool:
     return min(levels) <= mine
 
 
+def edu_score(job: Job, profile: dict) -> tuple[int, str]:
+    """学历可达性 +4/-8（2026-09-20 新增）。
+
+    旧版学历完全不参与打分（只做看板层过滤），导致硕博-only 岗与本科可投岗
+    同分霸榜——实测 ≥60 分岗里 52% 是硕博-only，本科用户根本投不了。
+    现在：岗位学历够得着（含不限/为空）+4；明确要求更高学历 -8 沉底
+    （不删除，看板层学历过滤仍可用）。
+    """
+    ue = (profile.get("education") or "").strip()
+    if not ue:
+        return 0, ""
+    je = (job.education or "").strip()
+    if not je or "不限" in je:
+        return 4, ""
+    if _edu_ok(je, ue):
+        return 4, ""
+    return -8, f"学历门槛:{je}"
+
+
 def hard_filter(job: Job, profile: dict) -> bool:
     """三级过滤。任一不过直接丢弃，不进入打分与入库。"""
     blob = _norm(f"{job.company} {job.title} {job.industry} {job.major}")
@@ -656,8 +675,10 @@ def score_job(job: Job, profile: dict, today: str = "") -> tuple[int, str]:
       单位性质    6  —— 声望 + 勾选加成（折叠旧「心仪性质」加分组）
       招聘类型    7  —— 校招/实习等（学生优先，空=不限）
       专业匹配    6  —— 岗位专业命中画像专业（2026-09-02 新增，此前专业字段是死字段）
+      学历可达  +4/-8 —— 本科可投 +4，硕博-only -8 沉底（2026-09-20 新增）
       薪资        5  —— 区间下限分档；低于画像 salary_min 时 -8
       可投递性    3  —— 链接越接近「点了就能投」越高
+      标题降权  -12 —— 画像 downgrade_keywords 命中标题（如"算法"，2026-09-20 新增）
     """
     reasons: list[str] = []
     score = 0
@@ -706,6 +727,12 @@ def score_job(job: Job, profile: dict, today: str = "") -> tuple[int, str]:
     if mreason:
         reasons.append(mreason)
 
+    # 学历可达性（+4/-8）：硕博-only 岗沉底，本科可投岗上浮
+    escore, ereason = edu_score(job, profile)
+    score += escore
+    if ereason:
+        reasons.append(ereason)
+
     # 薪资（0-5，低于画像门槛时 -8）
     sscore, sreason = salary_score(job, profile)
     score += sscore
@@ -723,6 +750,16 @@ def score_job(job: Job, profile: dict, today: str = "") -> tuple[int, str]:
     if pen:
         score -= pen
         reasons.append("来源降权")
+
+    # 标题降权词（画像 downgrade_keywords）：命中 → -12。
+    # 场景：用户刻意避开算法岗，但「AI/大模型/算法」方向类别含"算法"会给纯
+    # 算法岗满 30 方向分——降权让它们落到「备选」档而非霸占前排（不硬删，
+    # 保留人工判断空间；JD 里提算法但标题不提的应用岗不受影响）。
+    dg = [k for k in (profile.get("downgrade_keywords") or [])
+          if _norm(k) in _norm(job.title or "")]
+    if dg:
+        score -= 12
+        reasons.append("避开:" + "/".join(dg[:2]))
 
     return min(max(score, 0), 100), "；".join(reasons)
 

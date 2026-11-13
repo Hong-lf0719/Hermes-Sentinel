@@ -21,6 +21,8 @@ DEFAULT_PROFILE: dict = {
     "batches": ["提前批", "秋招", "春招", "补录", "实习"],
     "salary_min": 0,
     "exclude_keywords": [],
+    # 标题降权词：命中 -12（如"算法"——避开纯算法岗，但不硬删保留人工判断）
+    "downgrade_keywords": [],
     "updated_at": "",
 }
 

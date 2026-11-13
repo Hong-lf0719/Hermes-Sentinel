@@ -4,7 +4,8 @@
     "孝感",
     "湖北",
     "远程",
-    "西安"
+    "西安",
+    "陕西"
   ],
   "directions": [
     "AI/大模型/算法",
@@ -12,11 +13,15 @@
     "软件开发(后端)",
     "前端开发"
   ],
-  "recruit_type": [],
+  "recruit_type": [
+    "实习",
+    "校招"
+  ],
   "nature": [],
   "edu_threshold": "本科可投",
   "major": [
-    "计算机类"
+    "计算机类",
+    "数据科学/人工智能"
   ],
   "education": "本科",
   "batches": [
@@ -28,5 +33,6 @@
   ],
   "salary_min": 0,
   "exclude_keywords": [],
-  "updated_at": "2026-09-02 04:31"
+  "downgrade_keywords": [],
+  "updated_at": "2026-10-25 04:24"
 }

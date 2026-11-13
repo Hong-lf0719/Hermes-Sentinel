@@ -125,6 +125,13 @@ _PROVINCES = (
 )
 
 
+# 单字城市残片修复（截断 bug 兜底）：库里出现过 北/上/天/广/珠 等单字脏城市
+_CITY_FIX = {
+    "北": "北京", "上": "上海", "天": "天津", "广": "广州", "珠": "珠海",
+    "重": "重庆", "成": "成都", "武": "武汉", "西": "西安", "深": "深圳",
+}
+
+
 def _clean_city(name: str) -> str:
     """清理武大源的城市字段。
 
@@ -156,6 +163,9 @@ def _clean_city(name: str) -> str:
             if p.startswith(prov) and len(p) > len(prov):
                 p = p[len(prov):]
                 break
+        # 单字残片兜底（北→北京）；映射不到的单字直接丢弃
+        if len(p) == 1:
+            p = _CITY_FIX.get(p, "")
         if not p:
             continue
         if p not in seen:

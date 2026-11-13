@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>可观测性 Trace · Hermes Sentinel</title>
+<style>
+  :root{
+    --bg:#0f172a; --card:#1e293b; --card2:#273449; --line:#334155;
+    --txt:#e2e8f0; --sub:#94a3b8; --acc:#38bdf8; --good:#22c55e; --warn:#f59e0b; --bad:#ef4444;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}
+  header{padding:14px 16px;position:sticky;top:0;background:rgba(15,23,42,.94);backdrop-filter:blur(8px);z-index:10;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:17px}
+  .sub{color:var(--sub);font-size:12px;margin-top:2px}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--line)}
+  .bar input,.bar select{padding:7px 9px;background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:8px;font-size:13px}
+  .bar input[type=text]{min-width:120px}
+  button{cursor:pointer;border:none;border-radius:8px;padding:8px 12px;font-size:13px;font-weight:600}
+  .btn-go{background:var(--acc);color:#04293a}
+  .btn-refresh{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+  .stats{display:flex;gap:10px;flex-wrap:wrap;padding:12px 16px}
+  .stat{flex:1;min-width:110px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:11px 13px}
+  .stat .k{font-size:11px;color:var(--sub)}
+  .stat .v{font-size:22px;font-weight:800;margin-top:3px}
+  .stat.bad .v{color:var(--bad)} .stat.warn .v{color:var(--warn)} .stat.good .v{color:var(--good)}
+  .list{padding:0 16px 24px;display:grid;gap:11px}
+  .row{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .rhead{display:flex;align-items:center;gap:10px;padding:11px 13px;cursor:pointer}
+  .dot{flex:0 0 auto;width:9px;height:9px;border-radius:50%}
+  .dot.ok{background:var(--good)} .dot.error{background:var(--bad)}
+  .tool{font-weight:700}
+  .sid{color:var(--sub);font-size:12px;font-family:ui-monospace,monospace}
+  .when{margin-left:auto;color:var(--sub);font-size:11px}
+  .dur{flex:0 0 auto;font-size:12px;font-weight:700;font-family:ui-monospace,monospace}
+  .dur.slow{color:var(--warn)}
+  .barwrap{flex:0 0 auto;width:80px;height:6px;background:var(--card2);border-radius:4px;overflow:hidden}
+  .barfill{height:100%;background:var(--acc)}
+  .barfill.slow{background:var(--warn)}
+  .detail{display:none;border-top:1px solid var(--line);padding:11px 13px;background:#0b1426}
+  .detail.open{display:block}
+  .kv{font-size:12px;margin-bottom:8px}
+  .kv .lbl{color:var(--sub);display:block;margin-bottom:3px;font-size:11px}
+  .kv pre{margin:0;background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:8px;white-space:pre-wrap;word-break:break-all;font-size:12px;max-height:260px;overflow:auto;font-family:ui-monospace,monospace}
+  .err{color:var(--bad)}
+  .empty{text-align:center;color:var(--sub);padding:40px}
+  a.home{color:var(--acc);text-decoration:none;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🔭 可观测性 Trace</h1>
+  <div class="sub">每次工具调用的客观记录（入参 / 出参 / 耗时 / 状态 / 错误）· <a class="home" href="/dashboard">← Dashboard</a></div>
+</header>
+
+<div class="bar">
+  <input type="text" id="f-sid" placeholder="session_id（留空=全部）" />
+  <select id="f-status">
+    <option value="">状态：全部</option>
+    <option value="ok">ok</option>
+    <option value="error">error</option>
+  </select>
+  <input type="text" id="f-tool" placeholder="工具名（如 execute_command）" />
+  <input type="number" id="f-limit" value="200" min="1" max="2000" style="width:90px" placeholder="条数" />
+  <button class="btn-go" onclick="load()">查询</button>
+  <button class="btn-refresh" onclick="load()">刷新</button>
+</div>
+
+<div class="stats" id="stats"></div>
+<div class="list" id="list"><div class="empty">加载中…</div></div>
+
+<script>
+const TOKEN = "__WEB_TOKEN__";
+const api = (q) => `/api/traces?token=${encodeURIComponent(TOKEN)}&${q}`;
+const fmt = (ms) => ms == null ? "—" : (ms >= 1000 ? (ms/1000).toFixed(2)+"s" : Math.round(ms)+"ms");
+
+async function load(){
+  const sid = document.getElementById("f-sid").value.trim();
+  const status = document.getElementById("f-status").value;
+  const tool = document.getElementById("f-tool").value.trim();
+  const limit = document.getElementById("f-limit").value || 200;
+  const q = new URLSearchParams();
+  if(sid) q.set("session_id", sid);
+  if(status) q.set("status", status);
+  if(tool) q.set("tool", tool);
+  q.set("limit", limit);
+  const list = document.getElementById("list");
+  list.innerHTML = '<div class="empty">加载中…</div>';
+  try{
+    const r = await fetch(api(q.toString()));
+    const data = await r.json();
+    renderStats(data.summary);
+    if(!data.traces.length){ list.innerHTML = '<div class="empty">没有匹配的 trace 记录</div>'; return; }
+    list.innerHTML = data.traces.map(renderRow).join("");
+  }catch(e){
+    list.innerHTML = '<div class="empty err">加载失败：'+e+'</div>';
+  }
+}
+
+function renderStats(s){
+  const el = document.getElementById("stats");
+  const er = s.error_rate != null ? Math.round(s.error_rate*100) : 0;
+  const cls = s.errors>0 ? "bad" : "good";
+  const dcls = s.max_ms >= 8000 ? "warn" : "";
+  el.innerHTML = `
+    <div class="stat"><div class="k">记录总数</div><div class="v">${s.total}</div></div>
+    <div class="stat ${cls}"><div class="k">失败数 / 错误率</div><div class="v">${s.errors} · ${er}%</div></div>
+    <div class="stat"><div class="k">平均耗时</div><div class="v">${fmt(s.avg_ms)}</div></div>
+    <div class="stat ${dcls}"><div class="k">最慢单次</div><div class="v">${fmt(s.max_ms)}</div></div>`;
+}
+
+function renderRow(t){
+  const slow = t.duration_ms != null && t.duration_ms >= 8000;
+  const dot = t.status === "ok" ? "ok" : "error";
+  const durCls = slow ? "dur slow" : "dur";
+  const fillW = Math.min(100, Math.round((t.duration_ms||0)/200)); // 200ms 满格
+  const fillCls = slow ? "barfill slow" : "barfill";
+  const err = t.error_msg ? `<div class="kv"><span class="lbl err">错误信息</span><pre class="err">${esc(t.error_msg)}</pre></div>` : "";
+  return `<div class="row">
+    <div class="rhead" onclick="this.nextElementSibling.classList.toggle('open')">
+      <span class="dot ${dot}"></span>
+      <span class="tool">${esc(t.tool_name)}</span>
+      <span class="sid">${esc(String(t.session_id)).slice(0,16)}</span>
+      <span class="${fillCls}" style="width:80px;height:6px;background:var(--card2);border-radius:4px;overflow:hidden"><span class="${'barfill'}" style="display:block;height:100%;width:${fillW}%;background:${slow?'var(--warn)':'var(--acc)'}"></span></span>
+      <span class="${durCls}">${fmt(t.duration_ms)}</span>
+      <span class="when">${esc(String(t.created_at))}</span>
+    </div>
+    <div class="detail">
+      <div class="kv"><span class="lbl">入参 tool_args</span><pre>${esc(t.tool_args)}</pre></div>
+      ${err}
+      <div class="kv"><span class="lbl">输出 tool_result（截断 2000 字）</span><pre>${esc(t.tool_result)}</pre></div>
+    </div>
+  </div>`;
+}
+
+function esc(s){ return String(s==null?"":s).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+load();
+</script>
+</body>
+</html>

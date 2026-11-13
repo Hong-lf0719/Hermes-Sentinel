@@ -34,12 +34,13 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
 # 目标城市（实习僧 city 参数用中文城市名）
-CITIES = ("武汉", "孝感", "湖北")
+CITIES = ("武汉", "孝感", "西安")
 
 # 方向关键词 —— 贴合画像（数据科学 / AI 应用开发 / 数据开发）
 KEYWORDS = (
     "数据", "数据分析", "数据开发", "人工智能", "机器学习",
     "算法", "Python", "Java", "软件开发", "大数据",
+    "后端", "全栈", "软件工程", "开发", "AI",
 )
 
 MAX_PAGE = 5          # 单关键词×城市最多翻几页
@@ -179,7 +180,7 @@ class ShixisengSource(SourceAdapter):
                 for kw in KEYWORDS:
                     for page in range(1, MAX_PAGE + 1):
                         url = f"{BASE}/interns"
-                        params = {"k": kw, "c": city, "p": page}
+                        params = {"k": kw, "city": city, "p": page}
                         try:
                             r = await cli.get(url, params=params, timeout=25)
                             r.raise_for_status()
