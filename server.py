@@ -135,6 +135,14 @@ def init_db():
             )
         """)
         db.execute("CREATE INDEX IF NOT EXISTS idx_session ON conversations(session_id, created_at)")
+        # 公司情报缓存：投递前调研结果（学历门槛/口碑/动态/面经），7 天过期可刷新
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS company_intel (
+                company TEXT PRIMARY KEY,
+                intel_json TEXT NOT NULL,
+                searched_at TIMESTAMP DEFAULT (datetime('now','localtime'))
+            )
+        """)
         db.execute("""
             CREATE TABLE IF NOT EXISTS reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -568,6 +576,21 @@ TOOLS = [
                 "required": ["key", "value"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "company_research",
+            "description": "投递前公司情报调研：搜索该公司的校招学历门槛、员工口碑（加班/氛围）、近期动态（裁员/扩张）与面经，生成结构化情报卡。用户问「XX公司怎么样/值不值得投/对双非友好吗/加班严重吗」时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "公司名"},
+                    "focus": {"type": "string", "description": "重点关注方向，如 学历门槛/加班强度/稳定性，留空则全面调研"}
+                },
+                "required": ["company"]
+            }
+        }
     }
 ]
 
@@ -865,6 +888,27 @@ async def arxiv_latest(keyword: str = "AI agent", max_results: int = 5) -> str:
 # ============================================================
 # 网页搜索（多源容错：Bing 可选 → DuckDuckGo 免密钥 → 优雅降级）
 # ============================================================
+def _parse_bing_cn_html(html_text: str, max_results: int) -> str:
+    """从 Bing 中国站结果页解析 标题/链接/摘要（<li class="b_algo"> 结构，无外部依赖）"""
+    import re
+    out = []
+    blocks = re.findall(r'<li class="b_algo".*?</li>', html_text, flags=re.DOTALL | re.IGNORECASE)
+    for b in blocks[:max_results]:
+        m = re.search(r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', b, flags=re.DOTALL | re.IGNORECASE)
+        if not m:
+            continue
+        url = m.group(1)
+        title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+        snip = ""
+        ms = re.search(r"<p[^>]*>(.*?)</p>", b, flags=re.DOTALL | re.IGNORECASE)
+        if ms:
+            snip = re.sub(r"<[^>]+>", "", ms.group(1)).strip()
+        if not title:
+            continue
+        out.append(f"{len(out) + 1}. **{title[:80]}**\n   {snip[:140]}\n   🔗 {url}\n")
+    return "\n".join(out)
+
+
 def _parse_ddg_html(html_text: str, max_results: int) -> str:
     """从 DuckDuckGo HTML 结果页解析 标题/链接/摘要（无外部依赖）"""
     import re
@@ -891,13 +935,41 @@ async def web_search(query: str, max_results: int = 5) -> str:
     多源容错的网页搜索。
 
     数据源（按优先级自动降级）：
+      0. Tavily Search API —— 为 AI Agent 设计的搜索 API（免费额度 1000 次/月），
+         注册 tavily.com 取 key 后设 TAVILY_API_KEY 即启用；返回干净正文，国内可达
       1. Bing Web Search v7 —— 若环境变量 BING_SEARCH_KEY 已配置
-      2. DuckDuckGo HTML —— 免密钥，默认启用
-      3. 全部失败 → 返回友好提示（不抛异常、不中断主流程）
+      2. DuckDuckGo HTML —— 免密钥（大陆网络常被墙）
+      3. Bing 中国站 HTML 抓取 —— 免密钥国内直连（注意：连续自动化查询会被
+         Bing 软封锁——返回不相关的词典类结果，此时应改用 Tavily）
+      4. 全部失败 → 返回友好提示（不抛异常、不中断主流程）
 
     设计目标：任一搜索源抖动都不应导致 Agent 整体失败 —— 这是
     “多源容错降级”工程能力的体现。
     """
+    # 数据源 0：Tavily（推荐：AI Agent 专用搜索 API，免费额度充足）
+    tavily_key = os.getenv("TAVILY_API_KEY")
+    if tavily_key:
+        try:
+            async with httpx.AsyncClient(timeout=20, verify=certifi.where()) as cli:
+                r = await cli.post("https://api.tavily.com/search", json={
+                    "api_key": tavily_key, "query": query,
+                    "max_results": max_results, "search_depth": "advanced",
+                    "include_answer": False,
+                })
+                if r.status_code == 200:
+                    items = r.json().get("results", [])
+                    if items:
+                        lines = [f"🔎 **Tavily 搜索: 「{query}」**\n"]
+                        for i, it in enumerate(items[:max_results], 1):
+                            lines.append(f"{i}. **{it.get('title', '')}**")
+                            content = (it.get("content", "") or "")[:160]
+                            if content:
+                                lines.append(f"   {content}")
+                            lines.append(f"   🔗 {it.get('url', '')}\n")
+                        return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"Tavily 搜索失败，降级下一数据源: {e}")
+
     # 数据源 1：Bing（可选）
     bing_key = os.getenv("BING_SEARCH_KEY")
     if bing_key:
@@ -930,6 +1002,19 @@ async def web_search(query: str, max_results: int = 5) -> str:
                     return f"🔎 **DuckDuckGo 搜索: 「{query}」**\n{parsed}"
     except Exception as e:
         logger.warning(f"DuckDuckGo 搜索失败: {e}")
+
+    # 数据源 2.5：Bing 中国站 HTML（免密钥 · 国内直连可用——DDG 被墙时的主兜底）
+    try:
+        async with httpx.AsyncClient(timeout=15, verify=certifi.where(),
+                                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+                                              "Accept-Language": "zh-CN,zh;q=0.9"}) as cli:
+            r = await cli.get("https://cn.bing.com/search", params={"q": query, "count": max_results})
+            if r.status_code == 200 and "b_results" in r.text:
+                parsed = _parse_bing_cn_html(r.text, max_results)
+                if parsed:
+                    return f"🔎 **Bing(国内) 搜索: 「{query}」**\n{parsed}"
+    except Exception as e:
+        logger.warning(f"Bing 国内站搜索失败: {e}")
 
     # 数据源 3：优雅降级
     return f"⚠️ 网页搜索暂时不可用（Bing/DuckDuckGo 均失败），已跳过联网检索。"
@@ -1019,6 +1104,144 @@ async def profile_update(key: str, value: str) -> str:
         return f"✅ 已更新画像「{key}」= {value}"
     except Exception as e:
         return f"⚠️ 画像更新失败: {e}"
+
+
+# ── 公司情报：投递前调研（学历门槛 / 员工口碑 / 近期动态 / 面经） ──
+# 面向"民办二本投大厂容易石沉大海"的真实痛点：投之前先看这家公司
+# 对学历的态度、口碑与近期稳定性，把有限的精力投给回复率更高的公司。
+_COMPANY_INTEL_TTL_DAYS = 7
+_INTEL_QUERIES = [
+    "{c} 校园招聘 学历要求 本科 双非 一本",
+    "{c} 员工评价 加班 工作强度",
+    "{c} 裁员 扩张 经营状况",
+    "{c} 面经 面试经验 校招",
+]
+
+
+def _save_company_intel(company: str, intel: dict) -> None:
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO company_intel (company, intel_json, searched_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(company) DO UPDATE SET intel_json=excluded.intel_json, "
+            "searched_at=excluded.searched_at",
+            (company, json.dumps(intel, ensure_ascii=False), _now_local()),
+        )
+        db.commit()
+
+
+def _load_company_intel(company: str) -> dict | None:
+    with get_db() as db:
+        r = db.execute(
+            "SELECT intel_json, searched_at FROM company_intel WHERE company = ?", (company,)
+        ).fetchone()
+    if not r:
+        return None
+    try:
+        return {"intel": json.loads(r["intel_json"]), "searched_at": r["searched_at"]}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _intel_stale(cached: dict) -> bool:
+    sa = (cached.get("searched_at") or "")[:19]
+    try:
+        dt = datetime.strptime(sa, "%Y-%m-%d %H:%M:%S")
+        return (datetime.now() - dt).days >= _COMPANY_INTEL_TTL_DAYS
+    except Exception:  # noqa: BLE001
+        return True
+
+
+async def _ai_json(prompt: str, max_tokens: int = 2600) -> dict | None:
+    """LLM 结构化 JSON 输出（json_object 模式 + 3 次重试）。失败返回 None。"""
+    last_err = None
+    for _attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=90, verify=certifi.where()) as cli:
+                r = await cli.post(
+                    f"{BASE_URL}/chat/completions",
+                    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                    json={"model": MODEL,
+                          "messages": [{"role": "user", "content": prompt}],
+                          "max_tokens": max_tokens, "temperature": 0.4,
+                          "response_format": {"type": "json_object"}},
+                )
+            if r.status_code != 200:
+                last_err = f"HTTP {r.status_code}"
+                await asyncio.sleep(2)
+                continue
+            content = ((r.json().get("choices", [{}])[0].get("message", {}) or {}).get("content") or "").strip()
+            if not content:
+                await asyncio.sleep(2)
+                continue
+            return json.loads(content)
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e)
+            await asyncio.sleep(2)
+    logger.warning(f"_ai_json 生成失败: {last_err}")
+    return None
+
+
+def _intel_reply_text(company: str, intel: dict) -> str:
+    bar = intel.get("school_barrier") or "未知"
+    lines = [f"🏢 {company} · 学历门槛信号：{bar}（置信度 {intel.get('confidence', '低')}）"]
+    if intel.get("school_note"):
+        lines.append(f"· {intel['school_note']}")
+    for k, icon in (("employee_voice", "🗣 员工口碑"), ("recent_moves", "📈 近期动态"), ("interview_tips", "🧪 面经要点")):
+        vals = intel.get(k) or []
+        if vals:
+            lines.append(f"{icon}：" + "；".join(vals[:3]))
+    if intel.get("w2w_advice"):
+        lines.append(f"💡 建议：{intel['w2w_advice']}")
+    lines.append("（信息来自公开搜索摘要，供参考非事实结论）")
+    return "\n".join(lines)
+
+
+async def company_research(company: str = "", focus: str = "") -> str:
+    """工具入口：多路搜索 + LLM 结构化汇总，生成公司情报卡（7 天缓存）。"""
+    company = (company or "").strip()
+    if not company:
+        return "⚠️ 请告诉我要调研的公司名"
+    cached = _load_company_intel(company)
+    if cached and not _intel_stale(cached):
+        return _intel_reply_text(company, cached["intel"])
+
+    queries = [q.format(c=company) for q in _INTEL_QUERIES]
+    gathered = await asyncio.gather(
+        *[_cached(f"intel_{company}_{i}", 600, lambda qs=q: web_search(qs, 6))
+          for i, q in enumerate(queries)],
+        return_exceptions=True,
+    )
+    texts = []
+    for i, r in enumerate(gathered):
+        body = r if isinstance(r, str) else f"搜索失败: {r}"
+        texts.append(f"【检索{i + 1}】{body}")
+    material = "\n".join(texts)[:6000]
+
+    prompt = f"""你是求职情报分析师。用户背景：民办二本（独立学院）2027 届本科，找 AI 应用开发/数据方向，关心学历门槛。
+调研公司：{company}{('，重点关注：' + focus) if focus else ''}
+
+以下是四路公开搜索摘要（可能含广告或无关内容，请甄别；没有证据的维度如实写"未检索到"）：
+{material}
+
+输出 JSON（不要解释）：
+{{
+  "school_barrier": "宽松|一般|严格|未知",
+  "school_note": "学历门槛判断依据一句话（引用搜索证据；无证据则写'未检索到明确学历门槛信息'）",
+  "employee_voice": ["员工口碑要点（加班强度/氛围/待遇，标注来源网站提示）"],
+  "recent_moves": ["近期动态（扩张/裁员/经营状况）"],
+  "interview_tips": ["面经要点"],
+  "w2w_advice": "结合民办二本背景给一句投递建议",
+  "confidence": "低|中|高",
+  "sources_hint": ["来源网站提示"]
+}}
+规则：只依据搜索材料，绝不编造；证据越少 confidence 越低。"""
+
+    intel = await _ai_json(prompt)
+    if not intel:
+        return "⚠️ 公司情报生成失败（搜索/模型暂时不可用），稍后再试"
+    intel.setdefault("company", company)
+    _save_company_intel(company, intel)
+    return _intel_reply_text(company, intel)
 
 
 # —— 简单 TTL 缓存：缓解 GitHub/arXiv/HN/新闻 外部 API 限流（日报频繁生成时不重复打）——
@@ -1850,6 +2073,7 @@ TOOL_MAP = {
     "job_sentinel_scan": job_sentinel_scan,
     "job_sync_email": job_sync_email,
     "profile_update": profile_update,
+    "company_research": company_research,
 }
 
 
@@ -3212,6 +3436,77 @@ async def api_profile_suggest(kw: str = ""):
     """关键词/专业 → 推荐相关方向类别。前端「写AI开发→推荐相关方向」用。"""
     from job_sentinel.matcher import suggest_directions
     return {"directions": suggest_directions(kw)}
+
+
+# ── 公司情报 API：投递前调研（首次现场生成 10~40 秒，之后 7 天缓存秒回） ──
+@app.get("/api/company-intel", dependencies=[Depends(require_auth)])
+async def api_company_intel(company: str, refresh: bool = False, focus: str = ""):
+    company = (company or "").strip()
+    if not company:
+        raise HTTPException(status_code=400, detail="缺少 company 参数")
+    cached = _load_company_intel(company)
+    if cached and not refresh and not _intel_stale(cached):
+        return {"company": company, "intel": cached["intel"],
+                "searched_at": cached["searched_at"], "cached": True}
+    await company_research(company, focus)
+    fresh = _load_company_intel(company)
+    return {"company": company, "intel": (fresh or {}).get("intel", {}),
+            "searched_at": (fresh or {}).get("searched_at", ""), "cached": False}
+
+
+# ── 投递回复率分析：把"投了没回应"变成可视化的分组转化率 ──
+@app.get("/api/response-analysis")
+async def api_response_analysis():
+    """按 企业性质 / 学历要求 / 来源 三维度统计投递转化率。
+
+    口径：applied = 已投+笔试+面试+OC+挂（真实投出）；responded = 笔试/面试/OC/挂
+    （拒信也算回应，石沉大海不算）；response_rate = responded / applied。
+    每组 applied < 3 标 low_confidence——样本不足时不编造结论。
+    """
+    def _collect(col: str) -> list[dict]:
+        with get_db() as db:
+            rows = db.execute(
+                f"SELECT {col} AS g, status, COUNT(*) AS n FROM jobs "
+                "WHERE status IN ('已投','笔试','面试','OC','挂') AND TRIM(COALESCE(g,'')) != '' "
+                f"GROUP BY {col}, status"
+            ).fetchall()
+        agg: dict = {}
+        for r in rows:
+            g = agg.setdefault(r["g"], {"applied": 0, "responded": 0, "interview": 0,
+                                        "oc": 0, "rejected": 0, "pending": 0})
+            s, n = r["status"], r["n"]
+            g["applied"] += n
+            if s in ("笔试", "面试", "OC", "挂"):
+                g["responded"] += n
+            if s in ("面试", "OC"):
+                g["interview"] += n
+            if s == "OC":
+                g["oc"] += n
+            if s == "挂":
+                g["rejected"] += n
+        out = []
+        for g, v in agg.items():
+            v["g"] = g
+            v["response_rate"] = round(v["responded"] / v["applied"], 2) if v["applied"] else 0
+            v["low_confidence"] = v["applied"] < 3
+            out.append(v)
+        out.sort(key=lambda x: (-x["applied"], x["g"]))
+        return out
+
+    if not all(_has_table(t) for t in ("jobs",)):
+        return {"dimensions": [], "note": "岗位库尚未初始化"}
+    return {"dimensions": [
+        {"dim": "enterprise_type", "label": "企业性质", "groups": _collect("enterprise_type")},
+        {"dim": "education", "label": "学历要求", "groups": _collect("education")},
+        {"dim": "source", "label": "投递来源", "groups": _collect("source")},
+    ]}
+
+
+def _has_table(name: str) -> bool:
+    with get_db() as db:
+        return db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone() is not None
 
 
 # ── 用户画像（user_profile 表）读写：画像中心 UI 用 ──

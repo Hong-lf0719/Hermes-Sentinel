@@ -139,6 +139,25 @@
   .modal .foot button{flex:1}
   .btn-save{background:var(--acc);color:#04293a}
   .btn-cancel{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+  /* 公司情报弹窗 */
+  .imask{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:30;padding:16px}
+  .imask.on{display:flex}
+  .imodal{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;width:100%;max-width:520px;max-height:86vh;overflow:auto;position:relative}
+  .imodal h3{margin:0 0 4px;font-size:16px;color:var(--txt)}
+  .imodal .isub{font-size:11.5px;color:var(--sub);margin-bottom:12px}
+  .isec{margin-top:12px}
+  .isec .it{font-size:12px;color:var(--acc);font-weight:700;margin-bottom:5px}
+  .isec li{font-size:12.5px;color:#cbd5e1;line-height:1.55;margin:0 0 4px 16px}
+  .ibarrier{font-size:13px;font-weight:700;padding:6px 10px;border-radius:8px;display:inline-block}
+  .ibarrier.b-loose{background:#14532d;color:#4ade80}
+  .ibarrier.b-mid{background:#78350f;color:#fcd34d}
+  .ibarrier.b-strict{background:#7f1d1d;color:#fca5a5}
+  .ibarrier.b-unknown{background:var(--card2);color:var(--sub)}
+  .iconf{font-size:11px;color:var(--sub);margin-top:2px}
+  .inote{font-size:11px;color:var(--sub);background:var(--card2);border-radius:8px;padding:8px 10px;margin-top:12px;line-height:1.5}
+  .ibtn-intel{background:var(--card2);color:var(--sub);border:1px solid var(--line);font-weight:500}
+  .ibtn-intel:hover{border-color:var(--acc);color:var(--acc)}
+  .imodal .iclose{position:absolute;top:10px;right:14px;font-size:20px;color:var(--sub);cursor:pointer}
   .prof-note{font-size:12px;color:var(--sub);background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:14px;line-height:1.55}
   .prof-note b{color:var(--acc)}
   .group{margin-bottom:14px}
@@ -292,6 +311,14 @@
       <button class="btn-cancel" onclick="closeSet()">取消</button>
       <button class="btn-save" onclick="saveSet()">保存并重算</button>
     </div>
+  </div>
+</div>
+
+<!-- 公司情报弹窗 -->
+<div class="imask" id="intelModal" onclick="if(event.target===this)closeIntel()">
+  <div class="imodal">
+    <span class="iclose" onclick="closeIntel()">×</span>
+    <div id="intelBody"><div class="empty">点击岗位卡片上的「🔍 情报」开始调研</div></div>
   </div>
 </div>
 
@@ -520,8 +547,38 @@ function cardHTML(j){
     ${j.match_reason?`<div class="reason">💡 ${esc(j.match_reason)}</div>`:""}
     ${sug}
     ${j.jd_text?`<div class="jd"><button class="jd-btn" onclick="toggleJD(this)">📋 查看岗位 JD（自动补全）</button><div class="jd-body" style="display:none">${esc(j.jd_text)}</div></div>`:""}
-    <div class="actions"><div class="sg">${sg}</div>${link}<button class="mini-btn hide-btn" onclick="hideJob('${j.raw_hash}',this)">标记不投</button></div>
+    <div class="actions"><div class="sg">${sg}</div>${link}<button class="mini-btn ibtn-intel" onclick="openIntel(this)" data-company="${esc(j.company||'')}">🔍 情报</button><button class="mini-btn hide-btn" onclick="hideJob('${j.raw_hash}',this)">标记不投</button></div>
   </div>`;
+}
+/* ── 公司情报弹窗：投递前看学历门槛/口碑/动态/面经 ── */
+function openIntel(btn){
+  const company = btn.getAttribute("data-company") || "";
+  if(!company){ toast("该岗位公司名未公开，无法调研"); return; }
+  const box = document.getElementById("intelModal");
+  const body = document.getElementById("intelBody");
+  box.classList.add("on");
+  body.innerHTML = '<div class="loading">🔍 正在多路检索并生成情报卡…（首次约 10~40 秒）</div>';
+  HermesUI.api("/api/company-intel?company=" + encodeURIComponent(company))
+    .then(d => { body.innerHTML = intelHTML(d.intel || {}, d.searched_at || "", d.cached); })
+    .catch(e => { body.innerHTML = '<div class="empty">情报生成失败：' + HermesUI.esc(e.message) + '<br>可稍后重试，或直接在对话里问「' + HermesUI.esc(company) + '怎么样」</div>'; });
+}
+function closeIntel(){ document.getElementById("intelModal").classList.remove("on"); }
+function intelHTML(v, searchedAt, cached){
+  const b = v.school_barrier || "未知";
+  const bcls = {"宽松":"b-loose","一般":"b-mid","严格":"b-strict"}[b] || "b-unknown";
+  const sec = (title, items) => (items && items.length)
+    ? `<div class="isec"><div class="it">${title}</div><ul>${items.map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>` : "";
+  return `<h3>${esc(v.company || "")} 情报卡</h3>
+    <div class="isub">${cached ? "缓存（7 天内可刷新）" : "刚生成"} · 检索时间 ${esc(String(searchedAt).slice(0,16))}</div>
+    <div class="isec"><div class="it">🎓 校招学历门槛信号</div>
+      <span class="ibarrier ${bcls}">${esc(b)}</span>
+      <div style="font-size:12.5px;color:#cbd5e1;margin-top:6px">${esc(v.school_note || "未检索到明确信息")}</div></div>
+    ${sec("🗣 员工口碑（加班 / 氛围 / 待遇）", v.employee_voice)}
+    ${sec("📈 近期动态（扩张 / 裁员 / 经营）", v.recent_moves)}
+    ${sec("🧪 面经要点", v.interview_tips)}
+    ${v.w2w_advice ? `<div class="isec"><div class="it">💡 投递建议</div><div style="font-size:12.5px;color:#cbd5e1">${esc(v.w2w_advice)}</div></div>` : ""}
+    <div class="inote">⚠ 信息来自公开搜索摘要（口碑类内容为主观评价），置信度 ${esc(v.confidence || "低")}——供投递决策参考，非事实结论。点弹窗外关闭；「刷新情报」重新联网生成。</div>
+    <div style="margin-top:10px"><button class="hs-btn ghost" onclick="openIntel(this)" data-company="${esc(v.company || "")}" style="width:100%">↻ 刷新情报</button></div>`;
 }
 async function setStatus(hash,status,btn){
   const r=await fetch("/api/jobs/"+hash+"/status",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+AUTH_TOKEN},body:JSON.stringify({status})});

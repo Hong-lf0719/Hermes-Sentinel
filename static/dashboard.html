@@ -88,8 +88,47 @@ async function load() {
     bindReportButtons();
     renderCharts(d);
     bindProfileEditor(d.user_profile || {});
+    loadResponseAnalysis();
   } catch (e) {
     el.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+/* ── 投递回复率分析：把"投了没回应"变成分维度转化率 ── */
+async function loadResponseAnalysis() {
+  const box = document.getElementById('respBox');
+  if (!box) return;
+  try {
+    const d = await api('/api/response-analysis');
+    const dims = d.dimensions || [];
+    const empties = dims.every(x => !(x.groups || []).length);
+    if (empties) { box.innerHTML = '<div class="empty">还没有投递记录——投出 3 家以上后，这里会告诉你哪类公司真的会回你。</div>'; return; }
+    let html = '<div style="font-size:11.5px;color:var(--sub);margin-bottom:10px">'
+             + '口径：回应 = 笔试/面试/OC/挂（拒信也算回应）；"石沉大海"不计入回应率。样本 &lt; 3 的分组标 ⚠，仅供参考。</div>';
+    for (const dim of dims) {
+      const groups = (dim.groups || []).filter(g => g.applied > 0);
+      if (!groups.length) continue;
+      html += `<div style="margin-bottom:14px"><div style="font-size:12.5px;color:var(--acc);font-weight:700;margin-bottom:6px">${esc(dim.label)}</div>`;
+      html += '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+      html += '<tr style="color:var(--sub);text-align:left"><th style="padding:4px 6px;font-weight:500">' + esc(dim.label)
+            + '</th><th style="padding:4px 6px;font-weight:500">投递</th><th style="padding:4px 6px;font-weight:500">回应率</th>'
+            + '<th style="padding:4px 6px;font-weight:500">面试/OC</th><th style="padding:4px 6px;font-weight:500">挂</th><th style="padding:4px 6px;font-weight:500"></th></tr>';
+      for (const g of groups.slice(0, 8)) {
+        const pct = Math.round(g.response_rate * 100);
+        const color = g.response_rate >= 0.5 ? 'var(--good)' : g.response_rate >= 0.25 ? 'var(--warn)' : 'var(--bad)';
+        html += `<tr style="border-top:1px solid var(--line)">
+          <td style="padding:5px 6px">${esc(g.g)}${g.low_confidence ? ' <span style="color:var(--warn)">⚠</span>' : ''}</td>
+          <td style="padding:5px 6px">${g.applied}</td>
+          <td style="padding:5px 6px"><span style="display:inline-block;width:64px;height:7px;background:var(--card2);border-radius:4px;overflow:hidden;vertical-align:middle"><span style="display:block;height:100%;width:${pct}%;background:${color}"></span></span> ${pct}%</td>
+          <td style="padding:5px 6px">${g.interview}</td>
+          <td style="padding:5px 6px">${g.rejected}</td>
+          <td style="padding:5px 6px"></td></tr>`;
+      }
+      html += '</table></div>';
+    }
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = '<div class="empty">分析失败：' + esc(e.message) + '</div>';
   }
 }
 
@@ -135,6 +174,11 @@ function render(d) {
   html += '<div id="profileBox" class="prof-grid"></div>';
   html += '<div class="prof-foot"><button class="btn primary" id="profSave">保存修改</button>'
         + '<span class="hint" id="profHint">修改后点保存，立即对 Agent 生效</span></div>';
+  html += '</div>';
+
+  // 投递回复率分析
+  html += '<div class="card"><h2><span class="dot"></span>投递回复率分析 <small style="color:var(--sub);font-weight:400">—— 哪类公司真的会回你</small></h2>';
+  html += '<div id="respBox" class="loading">分析中…</div>';
   html += '</div>';
 
   // 长期知识库
