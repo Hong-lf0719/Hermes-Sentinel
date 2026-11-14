@@ -2,8 +2,23 @@
 
 > **让信息找人，而不是人找信息。**
 > 在 Email / 手机浏览器上，像聊天一样让 AI 帮你搜信息、生成情报日报、管理长期记忆、按需操控电脑。
+>
+> *A multi-channel AI intelligence agent — FastAPI + DeepSeek gateway, pluggable async adapters, RAG long-term memory, and a live job radar dashboard. Information finds you.*
 
 Hermes Sentinel 是一个面向**求职 AI/Agent 岗位**的个人信息情报助手：多渠道接入、可插拔的异步适配器、RAG 长期记忆、主动情报推送、以及一个可演示的 Web 后台。强调**工程成熟度**而非功能堆砌——异步 SDK 接入层、结构化渲染、记忆系统、模块化可发布包，都是可直接写进简历的硬资产。
+
+## 🚀 90 秒 Demo
+
+> 启动后打开 **`/demo`**：一页看清「真实岗位数据 → 可解释匹配 → 投递漏斗 → Agent 对话 → Trace」。
+> 面试时按 [`DEMO.md`](DEMO.md) 的 5 步讲，不迷路。
+
+![Hermes Demo](docs/hermes_demo.png)
+
+岗位雷达（真实数据）：
+
+![Hermes Jobs](docs/hermes_jobs.png)
+
+当前本地演示库：**5,879 条岗位、8 个来源、64 个 ≥75 分高匹配**；数据来自武大/华科就业网、国聘、实习僧、企业官网等。
 
 ## 🎯 核心能力
 
@@ -16,7 +31,9 @@ Hermes Sentinel 是一个面向**求职 AI/Agent 岗位**的个人信息情报�
 | 🧠 RAG 长期记忆 | TF-IDF 向量库持久化，每次对话**自动注入**上下文 | 「记住我的简历…」 |
 | 💻 本机操控 | 执行命令（白名单安全限制）、读写文件 | 「桌面有什么文件」 |
 | 📡 按需推送 | 在邮件里喊一声，HTML 情报邮件推到手机 | 邮件发「发日报」 |
-| 📈 可视化后台 | 对话统计 / 知识库 / 工具调用 / 日报存档 | 浏览器开 `/dashboard` |
+| ⏰ 每日定时情报 | 每天 08:30 自动「扫岗位 + 生成 AI 日报 + 推邮件」，错过开机窗口自动补发 | 无需操作 / `HERMES_DAILY_PUSH_HOUR` 可调 |
+| 👤 画像中心 | 结构化用户画像（毕业/城市/方向/技能）可视化编辑，改完立即对 Agent 生效 | 浏览器开 `/dashboard` |
+| 📈 可视化后台 | 统一导航 + SVG 图表（投递漏斗 / 7 日趋势 / 工具调用排行）+ 对话 / 知识库 / 日报存档 | 浏览器开 `/dashboard` |
 | 🎯 秋招哨兵 | 按地区/方向/学历/院校/批次筛选匹配校招岗位，卡片流 + 投递状态追踪 | 「扫岗位」「查秋招」 / 浏览器开 `/jobs` |
 
 ## 🏗️ 架构
@@ -26,14 +43,14 @@ Email (Caspian) ──┐
                   ├──→ hermes_caspian (异步适配器) ──┐
 手机浏览器 ───────┤                                    ├──→ Agent Core ──→ DeepSeek API
   (FastAPI)       └──→ static/index.html, dashboard ──┘        │
-                                                              │   14 个工具 (web / 报告 / RAG / 操控)
+                                                              │   15 个工具 (web / 报告 / RAG / 岗位 / 操控)
 RAG 长期记忆 ───── hermes_rag (自动注入) ─────────────────────┘
                                                               └── reports 表 (日报存档)
 ```
 
 - **接入层**：`hermes_caspian`（可发布 pip 包，异步 Email 接入）+ FastAPI Web UI
 - **核心**：DeepSeek（`deepseek-v4-flash`，走代理网关）
-- **工具（14 个）**：`web_search` / `search_github` / `hackernews_top` / `arxiv_latest` / `ai_daily_report` / `ai_job_report` / `job_sentinel_scan` / `job_sync_email` / `kb_add` / `kb_search` / `kb_stats` / `execute_command` / `read_file` / `write_file`
+- **工具（15 个）**：`web_search` / `search_github` / `hackernews_top` / `arxiv_latest` / `ai_daily_report` / `ai_job_report` / `job_sentinel_scan` / `job_sync_email` / `kb_add` / `kb_search` / `kb_stats` / `execute_command` / `read_file` / `write_file` / `profile_update`
 - **记忆双轨**：SQLite 短期对话历史 + `hermes_rag` 长期可检索知识库
 - **渲染**：`report_html.py` 数据驱动，输出手机 QQ 邮箱兼容的 table 布局 + 内联 CSS
 - **秋招哨兵**：`job_sentinel/`，按用户画像筛选匹配校招岗位，卡片流前端 `static/jobs.html`（PWA）
@@ -93,8 +110,9 @@ python server.py
 ```
 
 然后：
-- 电脑浏览器打开 http://localhost:9866
-- 手机浏览器打开 http://电脑IP:9866
+- **演示入口（推荐）**：`http://localhost:{PORT}/demo`
+- 电脑浏览器：`http://localhost:{PORT}`
+- 手机浏览器：`http://电脑IP:{PORT}`
 - 邮件渠道：对 Caspian 邮箱发「发日报」，HTML 情报邮件推到手机
 
 ### 4. （可选）RAG 长期记忆
@@ -118,15 +136,21 @@ hermes-sentinel/
 ├── server.py            # 核心服务 (FastAPI + Caspian + DeepSeek + 14 工具)
 ├── report_html.py       # 数据驱动 HTML 渲染（日报/求职报告）
 ├── static/
+│   ├── demo.html        # 90 秒演示首页（Demo Hub）
 │   ├── index.html       # Web 聊天 UI
+│   ├── jobs.html        # 岗位雷达 / 投递漏斗
+│   ├── deliveries.html  # 投递进度
+│   ├── traces.html      # 可观测性
 │   └── dashboard.html   # 可视化后台（对话/知识库/工具/日报存档）
+├── docs/                # README 截图
+├── DEMO.md              # 90 秒演示脚本 + 讲稿
 ├── hermes_caspian/      # 可发布异步 Email 接入层（pip 包）
 ├── hermes_rag/          # 可插拔 RAG 引擎（TF-IDF / 可选稠密，持久化）
 ├── requirements.txt
 ├── Dockerfile           # 通用容器化部署
 ├── .dockerignore
 ├── .env.example         # 环境变量模板
-├── DEPLOY.md            # 部署指南（Railway / 国内云）
+├── DEPLOY.md            # 部署指南
 ├── 启动.bat             # Windows 一键启动
 └── README.md
 ```
@@ -138,8 +162,13 @@ hermes-sentinel/
 - `execute_command` 受**命令白名单**约束：仅放行常用只读/开发命令，拦截 `rm`/`del`/`format`/`shutdown`/`powershell` 及 fork bomb 等危险指令。
 - 所有密钥走环境变量 / `.env`，不硬编码。
 
-## 🧪 工程化
+## 🧪 回归与验证
 
-- `hermes_caspian`：异步接入层，15 个 pytest 用例 + GitHub Actions CI（Python 3.10–3.12）
-- `hermes_rag`：12 个 pytest 用例覆盖灌库 / 检索 / 持久化重载 / 清空
-- 通用 Docker 部署配置，端口读 `PORT` 环境变量，适配云端动态端口
+- `test_regression_2026-09-04.py`、`e2e_mock_test.py` 是手工回归脚本，**不是 pytest 套件**。
+- 当前仓库没有完整 CI；不要把“15+12 pytest / GitHub Actions 全绿”写进简历，除非你补上并跑通。
+- 本次 Demo 已验证：`/health` 200、`/demo` 200、`/api/demo/summary` 200。
+- 下一步优先补：`tests/` + `pytest` + GitHub Actions，把“可回归”做实。
+
+## 🔗 我的其他项目
+
+- [data-analysis-agent](https://github.com/Hong-lf0719/data-analysis-agent) — LangGraph 驱动的数据分析 Agent（`SKILL.md` 开放标准、60 项测试、TDD for Skills 校验规则）。

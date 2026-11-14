@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hermes Sentinel · Demo</title>
+<style>
+  :root{
+    --bg:#070b14; --panel:#0d1524; --panel2:#111c30; --line:#23324a;
+    --txt:#e8eef8; --sub:#94a3b8; --muted:#64748b;
+    --acc:#38bdf8; --good:#34d399; --warn:#fbbf24; --violet:#a78bfa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:
+    radial-gradient(1200px 600px at 20% -10%, rgba(56,189,248,.16), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(167,139,250,.12), transparent 55%),
+    var(--bg);
+    color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.6}
+  a{color:inherit}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 22px}
+  header{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);background:rgba(7,11,20,.72);border-bottom:1px solid rgba(35,50,74,.7)}
+  .nav{display:flex;align-items:center;gap:18px;padding:14px 0}
+  .brand{font-weight:800;letter-spacing:.3px;display:flex;align-items:center;gap:9px}
+  .logo{width:28px;height:28px;border-radius:9px;background:linear-gradient(135deg,var(--acc),var(--violet));display:grid;place-items:center;color:#04111f;font-weight:900}
+  .nav-links{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+  .nav-links a{color:var(--sub);text-decoration:none;font-size:13px;padding:7px 10px;border-radius:8px}
+  .nav-links a:hover{color:var(--txt);background:rgba(56,189,248,.1)}
+  .hero{padding:58px 0 18px;display:grid;grid-template-columns:1.25fr .75fr;gap:28px;align-items:center}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;color:var(--acc);font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;border:1px solid rgba(56,189,248,.3);background:rgba(56,189,248,.08);padding:6px 10px;border-radius:999px}
+  h1{font-size:46px;line-height:1.12;margin:18px 0 14px;letter-spacing:-1px}
+  h1 span{background:linear-gradient(90deg,#38bdf8,#a78bfa);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .lead{color:var(--sub);font-size:16px;max-width:640px;margin:0 0 22px}
+  .lead b{color:var(--txt)}
+  .cta{display:flex;gap:10px;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:8px;text-decoration:none;font-weight:700;font-size:13px;padding:11px 16px;border-radius:10px;border:1px solid transparent}
+  .btn.primary{background:linear-gradient(135deg,#38bdf8,#0ea5e9);color:#04111f}
+  .btn.ghost{background:rgba(17,28,48,.8);border-color:var(--line);color:var(--txt)}
+  .btn:hover{transform:translateY(-1px);filter:brightness(1.05)}
+  .hero-card{background:linear-gradient(180deg,rgba(17,28,48,.95),rgba(13,21,36,.95));border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 30px 80px rgba(0,0,0,.35)}
+  .hero-card h3{margin:0 0 10px;font-size:13px;color:var(--sub);font-weight:600}
+  .flow{display:grid;gap:8px}
+  .node{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:rgba(7,11,20,.45);font-size:13px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--acc);box-shadow:0 0 12px var(--acc)}
+  .node small{display:block;color:var(--muted);font-size:11px}
+  .live{display:flex;align-items:center;gap:8px;color:var(--sub);font-size:12px;margin-top:12px}
+  .pulse{width:8px;height:8px;border-radius:50%;background:var(--good);animation:p 1.6s infinite}
+  @keyframes p{0%{box-shadow:0 0 0 0 rgba(52,211,153,.6)}70%{box-shadow:0 0 0 8px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+  .stats{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:26px 0 8px}
+  .stat{background:rgba(17,28,48,.72);border:1px solid var(--line);border-radius:14px;padding:14px}
+  .stat .n{font-size:24px;font-weight:800;letter-spacing:-.5px}
+  .stat .l{color:var(--muted);font-size:11px;margin-top:2px}
+  .stat .n.acc{color:var(--acc)} .stat .n.good{color:var(--good)} .stat .n.warn{color:var(--warn)} .stat .n.violet{color:var(--violet)}
+  section{padding:34px 0}
+  .sec-head{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:16px}
+  .sec-head h2{margin:0;font-size:22px;letter-spacing:-.3px}
+  .sec-head p{margin:0;color:var(--muted);font-size:12px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .card{background:linear-gradient(180deg,rgba(17,28,48,.82),rgba(13,21,36,.82));border:1px solid var(--line);border-radius:16px;padding:18px}
+  .card h3{margin:0 0 6px;font-size:15px}
+  .card p{margin:0;color:var(--sub);font-size:13px}
+  .icon{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:rgba(56,189,248,.1);border:1px solid rgba(56,189,248,.2);margin-bottom:12px;font-size:17px}
+  .steps{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;counter-reset:s}
+  .step{position:relative;background:rgba(17,28,48,.62);border:1px solid var(--line);border-radius:14px;padding:15px}
+  .step:before{counter-increment:s;content:counter(s);position:absolute;right:12px;top:10px;color:rgba(56,189,248,.35);font-weight:900;font-size:22px}
+  .step h4{margin:0 0 6px;font-size:13px;padding-right:24px}
+  .step p{margin:0;color:var(--muted);font-size:12px}
+  .prompt{margin-top:10px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#bae6fd;background:rgba(2,6,23,.7);border:1px solid rgba(56,189,248,.18);border-radius:8px;padding:8px;cursor:pointer;word-break:break-word}
+  .prompt:hover{border-color:var(--acc)}
+  .jobs{display:grid;gap:8px}
+  .job{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;background:rgba(17,28,48,.65);border:1px solid var(--line);border-radius:12px;padding:12px 14px;text-decoration:none}
+  .job:hover{border-color:var(--acc)}
+  .job .co{font-weight:700;font-size:14px}
+  .job .ti{color:var(--sub);font-size:12px;margin-top:2px}
+  .score{font-weight:800;color:var(--acc);font-size:18px;text-align:right}
+  .score small{display:block;color:var(--muted);font-size:10px;font-weight:500}
+  .arch{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;align-items:stretch}
+  .arch .box{background:rgba(17,28,48,.6);border:1px solid var(--line);border-radius:12px;padding:14px;text-align:center;font-size:12px;color:var(--sub)}
+  .arch .box b{display:block;color:var(--txt);font-size:13px;margin-bottom:3px}
+  .note{border-left:3px solid var(--warn);background:rgba(251,191,36,.06);padding:10px 12px;border-radius:8px;color:var(--sub);font-size:12px;margin-top:14px}
+  footer{border-top:1px solid var(--line);padding:20px 0 34px;color:var(--muted);font-size:12px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);background:#0b1220;border:1px solid var(--line);color:var(--txt);padding:10px 14px;border-radius:10px;font-size:13px;opacity:0;pointer-events:none;transition:.25s;z-index:50}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  @media(max-width:900px){.hero{grid-template-columns:1fr}.stats{grid-template-columns:repeat(3,1fr)}.steps{grid-template-columns:1fr 1fr}.grid3{grid-template-columns:1fr}.arch{grid-template-columns:1fr 1fr}h1{font-size:34px}}
+  @media(max-width:560px){.stats{grid-template-columns:1fr 1fr}.steps{grid-template-columns:1fr}.nav-links{display:none}.wrap{padding:0 14px}}
+</style>
+</head>
+<body>
+<header><div class="wrap nav">
+  <div class="brand"><div class="logo">H</div>Hermes Sentinel</div>
+  <nav class="nav-links">
+    <a href="/demo">Demo</a><a href="/jobs">岗位哨兵</a><a href="/deliveries">投递进度</a><a href="/dashboard">后台</a><a href="/traces">Trace</a><a href="/">对话</a>
+  </nav>
+</div></header>
+
+<main class="wrap">
+  <section class="hero">
+    <div>
+      <div class="eyebrow">● Agent Demo · 90 seconds</div>
+      <h1>让岗位找人，<br><span>而不是人找岗位</span></h1>
+      <p class="lead">Hermes Sentinel 是一个面向校招的 <b>AI 情报 Agent</b>：多源采集岗位、按画像打分、给出可解释推荐，并把投递进度自动串成漏斗。不是聊天套壳，而是一条能跑通的求职工作流。</p>
+      <div class="cta">
+        <a class="btn primary" href="/jobs">🚀 打开岗位雷达</a>
+        <a class="btn ghost" href="/" onclick="return goChat(event)">💬 进入 Agent 对话</a>
+      </div>
+      <div class="live"><span class="pulse"></span><span id="generated">实时读取本地数据…</span></div>
+    </div>
+    <div class="hero-card">
+      <h3>Agent Loop</h3>
+      <div class="flow">
+        <div class="node"><span class="dot"></span><div><b>采集</b><small>武大 / 华科 / 国聘 / 实习僧 / 企业官网</small></div></div>
+        <div class="node"><span class="dot" style="background:var(--violet);box-shadow:0 0 12px var(--violet)"></span><div><b>理解与打分</b><small>技术相关度 / 方向 / 地区 / 学历 / 官方链接</small></div></div>
+        <div class="node"><span class="dot" style="background:var(--good);box-shadow:0 0 12px var(--good)"></span><div><b>行动</b><small>推荐投递 → 记录状态 → 邮件/扩展同步</small></div></div>
+        <div class="node"><span class="dot" style="background:var(--warn);box-shadow:0 0 12px var(--warn)"></span><div><b>观测</b><small>Trace / 延迟 / 失败重试 / 日报存档</small></div></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="stats" id="stats">
+    <div class="stat"><div class="n acc" id="s-jobs">—</div><div class="l">已采集岗位</div></div>
+    <div class="stat"><div class="n good" id="s-high">—</div><div class="l">高匹配 ≥75</div></div>
+    <div class="stat"><div class="n violet" id="s-applied">—</div><div class="l">已投递</div></div>
+    <div class="stat"><div class="n warn" id="s-interview">—</div><div class="l">笔试 / 面试</div></div>
+    <div class="stat"><div class="n" id="s-sources">—</div><div class="l">数据源</div></div>
+    <div class="stat"><div class="n" id="s-reports">—</div><div class="l">已生成报告</div></div>
+  </div>
+
+  <section>
+    <div class="sec-head"><div><h2>90 秒演示路线</h2><p>面试时按这个顺序讲，不迷路。</p></div><a class="btn ghost" href="/jobs">从第 1 步开始 →</a></div>
+    <div class="steps">
+      <div class="step"><h4>岗位雷达</h4><p>打开 `/jobs`，按“AI/Agent + 武汉”筛选，展示真实岗位与匹配理由。</p></div>
+      <div class="step"><h4>可解释匹配</h4><p>点开一个岗位，展示分数、命中的关键词、官方投递链接。</p><div class="prompt" onclick="copyText('为什么这个岗位匹配我？')">为什么这个岗位匹配我？</div></div>
+      <div class="step"><h4>投递闭环</h4><p>标记“已投”，切到 `/deliveries` 看漏斗；说明状态只前进、拒信可覆盖。</p></div>
+      <div class="step"><h4>Agent 对话</h4><p>回到 `/`，生成一份定制日报，展示工具调用与流式输出。</p><div class="prompt" onclick="copyText('生成本周 AI/Agent 方向的情报日报')">生成本周 AI/Agent 方向的情报日报</div></div>
+      <div class="step"><h4>可观测性</h4><p>打开 `/traces`，展示工具耗时、错误率、重试；讲“不是黑盒”。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><div><h2>为什么不是玩具</h2><p>三个能被面试官追问的点。</p></div></div>
+    <div class="grid3">
+      <div class="card"><div class="icon">🧠</div><h3>真实数据，不是 mock</h3><p>多源采集 + 去重 + 岗位画像；每条推荐都有来源、匹配分和官方链接，不是随机返回。</p></div>
+      <div class="card"><div class="icon">🧩</div><h3>可解释的 Agent</h3><p>工具白名单、参数/结果校验、失败重试、5 轮上限；LLM 负责提议，代码负责终止与降级。</p></div>
+      <div class="card"><div class="icon">🔁</div><h3>投递闭环</h3><p>浏览器扩展捕获网申、邮件解析状态、漏斗只前进；从“看到岗位”到“面试/OC”可追踪。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><div><h2>当前高分岗位</h2><p>来自本地数据库，实时读取。</p></div><a class="btn ghost" href="/jobs">查看全部 →</a></div>
+    <div class="jobs" id="top-jobs"><div class="note">正在读取岗位数据…</div></div>
+  </section>
+
+  <section>
+    <div class="sec-head"><div><h2>架构一句话</h2><p>采集层 → 匹配层 → Agent 层 → 观测层。</p></div></div>
+    <div class="arch">
+      <div class="box"><b>Sources</b>武大 / 华科 / 国聘 / 实习僧 / 企业官网</div>
+      <div class="box"><b>Matcher</b>画像 + 技术相关度 + 硬条件 + 官方链接</div>
+      <div class="box"><b>Agent Core</b>FastAPI + DeepSeek + 15 tools + RAG memory</div>
+      <div class="box"><b>Loop</b>投递状态 / 邮件同步 / Trace / 日报</div>
+    </div>
+    <div class="note">演示提醒：公网部署前请关闭 `execute_command` / 文件写入等高危工具，或只在只读 Demo 模式开放；本地演示不受影响。</div>
+  </section>
+</main>
+
+<footer class="wrap">
+  <span>Hermes Sentinel · Job Intelligence Agent</span>
+  <span>数据仅本地读取 · 不包含密码 / Cookie</span>
+</footer>
+<div class="toast" id="toast"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1600)}
+function copyText(text){navigator.clipboard?.writeText(text).then(()=>toast('已复制，去对话里粘贴')).catch(()=>toast('复制失败，请手动复制'))}
+function goChat(e){e.preventDefault();location.href='/'}
+async function load(){
+  try{
+    const r=await fetch('/api/demo/summary',{cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    $('s-jobs').textContent=d.jobs.total;
+    $('s-high').textContent=d.jobs.high_match;
+    $('s-applied').textContent=d.jobs.applied;
+    $('s-interview').textContent=(d.jobs.tests||0)+(d.jobs.interviews||0);
+    $('s-sources').textContent=d.sources.length;
+    $('s-reports').textContent=d.activity.reports;
+    $('generated').textContent='本地数据 · 更新于 '+d.generated_at;
+    const list=$('top-jobs');
+    if(d.top_jobs?.length){
+      list.innerHTML=d.top_jobs.map(j=>`<a class="job" href="/jobs" target="_self">
+        <div><div class="co">${esc(j.company||'公司待确认')}</div><div class="ti">${esc(j.title||'')} · ${esc(j.city||'')} · ${esc(j.source||'')}</div></div>
+        <div class="score">${Math.round(j.score||0)}<small>match</small></div>
+      </a>`).join('');
+    }else{list.innerHTML='<div class="note">暂无岗位数据，去 `/jobs` 点「扫岗位」。</div>'}
+  }catch(e){
+    $('generated').textContent='数据读取失败：'+e.message;
+    $('top-jobs').innerHTML='<div class="note">无法读取 `/api/demo/summary`，请确认服务已启动。</div>';
+  }
+}
+load();
+</script>
+</body>
+</html>

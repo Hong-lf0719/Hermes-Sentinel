@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <title>岗位哨兵 · Hermes Sentinel</title>
 <link rel="manifest" href="/static/manifest.json" />
+<link rel="stylesheet" href="/static/common.css" />
 <style>
   :root{
     --bg:#0f172a; --card:#1e293b; --card2:#273449; --line:#334155;
@@ -149,7 +150,7 @@
 <body>
 <header>
   <h1>🎯 岗位哨兵</h1>
-  <div class="sub">按你的画像筛选 · 匹配 · 追踪校招岗位 · <a href="/" style="color:var(--acc)">返回对话</a></div>
+  <div class="sub">按你的画像筛选 · 匹配 · 追踪校招岗位 · <a href="/demo" style="color:var(--acc)">Demo</a> · <a href="/" style="color:var(--acc)">返回对话</a></div>
 </header>
 
 <div class="bar">
@@ -167,6 +168,7 @@
     <option value="new">按最新发现</option>
   </select>
   <select id="f-source" onchange="loadJobs()"><option value="">全部来源</option></select>
+  <input type="text" id="f-kw" placeholder="🔍 搜公司 / 职位…" oninput="loadJobs()" style="min-width:130px">
   <button class="btn-set" id="f-urgent" onclick="toggleUrgent()">⏰ 7天内截止</button>
   <button class="btn-set" id="f-region" onclick="toggleRegion()">📍 只看目标地区</button>
   <button class="btn-set" id="f-pfocus" onclick="toggleProfileFocus()">🎯 按画像聚焦</button>
@@ -272,7 +274,9 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="/static/common.js"></script>
 <script>
+HermesUI.renderNav("jobs");
 const STATUSES = ["新","已看","已投","笔试","面试","挂","OC"];
 let onlyReal = false;  // 只看真实投递（状态已推进 或 浏览器扩展主动投的）
 let urgentOnly = false;  // 只看 7 天内截止
@@ -376,6 +380,9 @@ async function loadJobs(){
   lastCount = (d.jobs?d.jobs.length:0);
   includeHiddenOnce=false;
   if(onlyReal) d.jobs=d.jobs.filter(j=>j.status!=='新'||(j.source||'').indexOf('浏览器扩展')>=0);
+  // 关键词过滤（前端，命中公司名/职位名）
+  const kw=(document.getElementById("f-kw").value||"").trim().toLowerCase();
+  if(kw)d.jobs=d.jobs.filter(j=>(j.company||"").toLowerCase().indexOf(kw)>=0||(j.title||"").toLowerCase().indexOf(kw)>=0);
   const list=document.getElementById("list");
   if(!d.jobs.length){list.innerHTML='<div class="empty">暂无匹配岗位。<br>点「扫岗位」触发哨兵扫描，或放宽分档 / 在「⚙ 画像」调整条件。</div>';loadStats();return;}
   list.innerHTML=d.jobs.map(cardHTML).join("");
@@ -754,8 +761,8 @@ function updateReach(){
   line += `。<br><span class="desc">注：岗位库无 985/211 细分标注；reach 按有学历标注的岗估算，其余岗位学历未抓取</span>`;
   el.innerHTML = line;
   // 用全库真实总数对齐看板（异步补齐，不阻塞渲染）
-  fetch("/api/jobs?min_score=0").then(r=>r.json()).then(d=>{
-    const total=d.count||0;
+  fetch("/api/jobs/stats").then(r=>r.json()).then(d=>{
+    const total=d.total||0;
     el.innerHTML = `本科视角可投 <b>${reach}</b> / 全库共 <b>${total}</b> 岗（其中 ${labeled} 条有学历标注，reach 据此估算）`
       + (thr==="本科可投"? `；勾选「仅本科可投」后将隐藏 <b>${bd["硕士及以上"]||0}</b> 个需硕士岗`:"")
       + (thr==="需硕士"? `；勾选「仅硕士」后只看 <b>${bd["硕士及以上"]||0}</b> 个岗位`:"")
@@ -825,10 +832,10 @@ async function saveSet(){
 /* 投递进度看板：从数据库自动汇总各状态数量（每次标记/刷新都重算），点胶囊即按状态筛选 */
 async function loadStats(){
   try{
-    const r=await fetch("/api/jobs?min_score=0");
+    // 轻量汇总接口：只回聚合数字，不再全量拉取岗位明细（岗位库大了也不卡）
+    const r=await fetch("/api/jobs/stats");
     const d=await r.json();
-    const cnt={};
-    d.jobs.forEach(j=>{const s=j.status||"新"; cnt[s]=(cnt[s]||0)+1;});
+    const cnt=d.by_status||{};
     const order=["新","已看","已投","笔试","面试","OC","挂"];
     document.getElementById("caps").innerHTML=order.map(st=>
       `<div class="cap c-${st} ${cnt[st]?'':'zero'}" onclick="filterStatus('${st}')"><span class="n">${cnt[st]||0}</span>${st}</div>`
@@ -839,17 +846,14 @@ async function loadStats(){
     }
     const ongoing=(cnt["笔试"]||0)+(cnt["面试"]||0)+(cnt["OC"]||0);
     // 分档汇总：一眼知道有多少值得优先投
-    const tc={};
-    d.jobs.forEach(j=>{const t=tierOf(j.match_score); tc[t]=(tc[t]||0)+1;});
+    const tc={"优先投":(d.tiers&&d.tiers.hi)||0,"值得投":(d.tiers&&d.tiers.mid)||0,"备选":(d.tiers&&d.tiers.ok)||0};
     document.getElementById("dash-sum").textContent=
-      `共 ${d.count} 岗 · 🔥优先投 ${tc["优先投"]||0} · ✅值得投 ${tc["值得投"]||0}`
+      `共 ${d.total} 岗 · 🔥优先投 ${tc["优先投"]} · ✅值得投 ${tc["值得投"]}`
       + ` · 已投 ${cnt["已投"]||0} · 进行中 ${ongoing} · 挂 ${cnt["挂"]||0}`;
     // 来源下拉自动填充（只填一次，保留用户当前选择）
     const sel=document.getElementById("f-source");
     if(sel.options.length<=1){
-      const srcCnt={};
-      d.jobs.forEach(j=>{const s=j.source||"未知"; srcCnt[s]=(srcCnt[s]||0)+1;});
-      Object.entries(srcCnt).sort((a,b)=>b[1]-a[1]).forEach(([s,n])=>{
+      Object.entries(d.sources||{}).forEach(([s,n])=>{
         const o=document.createElement("option"); o.value=s; o.textContent=`${s} (${n})`; sel.appendChild(o);
       });
     }

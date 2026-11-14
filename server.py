@@ -312,6 +312,8 @@ async def _startup_caspian():
     asyncio.create_task(start_caspian())
     # 启动自动扫描：延迟触发（等服务就绪 + Caspian 连上），高分新岗推邮件
     asyncio.create_task(_startup_auto_scan())
+    # 每日定时情报推送：08:30 扫岗位 + 发日报，错过开机窗口自动补发
+    asyncio.create_task(_daily_scheduler())
     # MCP 工具 Server 启动：失败仅告警并降级为纯本地工具，不阻塞服务
     if mcp_tools is not None:
         try:
@@ -1687,25 +1689,34 @@ AUTO_SCAN_PUSH_TOP_N = 10
 
 
 def _push_email_via_caspian(text: str, html: str = "") -> bool:
-    """主动发邮件到用户 QQ 邮箱（复用 Caspian 连接；SDK 全同步，放线程池跑）。"""
+    """主动发邮件到用户 QQ 邮箱（后台线程发送，绝不阻塞事件循环）。
+
+    修复记录：旧实现用 run_coroutine_threadsafe(...).result(timeout=30) 在事件循环
+    线程里同步等待——一旦 Caspian SDK 的 list_conversations 在代理环境下挂住，
+    整个服务（/health 都）会被拖死 30 秒起步。改为后台守护线程即发即忘，
+    发送结果写日志；调用方只关心"是否受理"。"""
     if _caspian_client is None:
+        logger.warning("推送邮件失败：Caspian 未连接")
         return False
+    import threading
+
     def _send():
-        convs = _caspian_client.list_conversations() or []
-        if not convs:
-            return False
-        cid = convs[0].get("id") or convs[0].get("conversation_id")
-        if not cid:
-            return False
-        _caspian_client.send_message(cid, text=text, html=html or None)
-        return True
-    try:
-        return asyncio.run_coroutine_threadsafe(
-            asyncio.to_thread(_send), asyncio.get_event_loop()
-        ).result(timeout=30)
-    except Exception as e:
-        logger.warning(f"启动扫描推送失败（不影响扫描结果）: {e}")
-        return False
+        try:
+            convs = _caspian_client.list_conversations() or []
+            if not convs:
+                logger.warning("推送邮件失败：Caspian 会话列表为空")
+                return
+            cid = convs[0].get("id") or convs[0].get("conversation_id")
+            if not cid:
+                logger.warning("推送邮件失败：Caspian 会话缺少 id")
+                return
+            _caspian_client.send_message(cid, text=text, html=html or None)
+            logger.info("推送邮件已发送")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"推送邮件发送异常: {e}")
+
+    threading.Thread(target=_send, name="hermes-email-push", daemon=True).start()
+    return True
 
 
 async def _startup_auto_scan():
@@ -1741,6 +1752,70 @@ async def _startup_auto_scan():
     lines.append("完整列表打开岗位哨兵看板：http://127.0.0.1:" + str(PORT) + "/jobs")
     if _push_email_via_caspian("\n".join(lines)):
         logger.info(f"已推送 {len(hot)} 个高分新岗到邮箱")
+
+
+# ── 每日定时情报推送：每天 08:30 自动「扫岗位 + 生成日报 + 推邮件」──
+# 错过补发：服务启动时若已过当天时点且今天尚未推送，立即补跑一次。
+# 推送日期记在 user_profile KV（_DAILY_LAST_KEY），重启不会重复推。
+DAILY_PUSH_HOUR = int(os.getenv("HERMES_DAILY_PUSH_HOUR", "8"))
+DAILY_PUSH_MIN = int(os.getenv("HERMES_DAILY_PUSH_MIN", "30"))
+_DAILY_LAST_KEY = "每日推送最后日期"
+
+
+def _daily_push_done_today() -> bool:
+    return load_profile().get(_DAILY_LAST_KEY, "") == datetime.now().strftime("%Y-%m-%d")
+
+
+async def _run_daily_push() -> str:
+    """每日推送统一入口：扫岗位 → 生成 AI 日报 → 邮件推送；记录日期防重复。"""
+    scan_summary = ""
+    try:
+        res = await _scan_once()
+        scan_summary = (f"采集 {res.get('collected', 0)} 条，匹配入库 {res.get('kept', 0)} 条"
+                        f"（新增 {res.get('new', 0)}）")
+    except RuntimeError:
+        pass  # 并发窗口内已有扫描在跑——跳过扫描，日报照推
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"每日推送-扫描失败（继续推日报）: {e}")
+    report_text, report_html_str = "AI 日报生成失败", ""
+    try:
+        rep = await ai_daily_report()
+        if isinstance(rep, dict) and not rep.get("error"):
+            report_text, report_html_str = report_html.render_report_html(rep, "数据科学")
+            _save_report("daily", rep, report_html_str)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"每日推送-日报生成失败: {e}")
+    lines = [f"📰 每日情报推送（{datetime.now().strftime('%Y-%m-%d %H:%M')}）", ""]
+    if scan_summary:
+        lines.append(f"✅ 岗位扫描：{scan_summary}")
+    lines.append(report_text or "")
+    lines.append("")
+    lines.append("打开岗位哨兵看板：http://127.0.0.1:" + str(PORT) + "/jobs")
+    update_profile(_DAILY_LAST_KEY, datetime.now().strftime("%Y-%m-%d"))
+    if _push_email_via_caspian("\n".join(lines), html=report_html_str or ""):
+        logger.info("每日情报推送已发送到邮箱")
+        return "已推送"
+    logger.warning("每日情报推送邮件发送失败（Caspian 未连接）")
+    return "推送失败"
+
+
+async def _daily_scheduler():
+    """每分钟醒来检查一次：过了当天推送时点且今天还没推 → 触发（错过开机窗口自动补发）。
+    注意：必须用 await asyncio.sleep（异步让出循环），同步 Event.wait 会阻塞整个事件循环。"""
+    logger.info(
+        f"每日定时推送已启用：每天 {DAILY_PUSH_HOUR:02d}:{DAILY_PUSH_MIN:02d} 扫岗位+发日报（错过补发）"
+    )
+    while not _SHUTDOWN.is_set():
+        try:
+            now = datetime.now()
+            target = now.replace(hour=DAILY_PUSH_HOUR, minute=DAILY_PUSH_MIN,
+                                 second=0, microsecond=0)
+            if now >= target and not _daily_push_done_today():
+                logger.info("到达每日推送时点，执行今日情报推送")
+                await _run_daily_push()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"每日定时推送异常（下一分钟重试）: {e}")
+        await asyncio.sleep(60)  # 异步让出循环；进程退出时任务随循环终止
 
 
 async def job_sentinel_scan() -> str:
@@ -2542,6 +2617,45 @@ def _dashboard_data() -> dict:
             data["reports"] = [{
                 "id": r["id"], "type": r["report_type"], "created_at": r["created_at"]
             } for r in rows]
+
+            # 近 7 日消息趋势（dashboard 折线图）
+            from datetime import timedelta as _td
+            trend_rows = db.execute(
+                "SELECT date(created_at, 'localtime') AS d, COUNT(*) AS n FROM conversations "
+                "WHERE role IN ('user','assistant') "
+                "AND created_at >= datetime('now','localtime','-6 days') "
+                "GROUP BY d ORDER BY d"
+            ).fetchall()
+            by_day = {r["d"]: r["n"] for r in trend_rows}
+            _base = datetime.now()
+            data["trend"] = [{"label": (_base - _td(days=i)).strftime("%m-%d"),
+                              "value": by_day.get((_base - _td(days=i)).strftime("%Y-%m-%d"), 0)}
+                             for i in range(6, -1, -1)]
+
+            # 投递漏斗聚合（jobs 表与 conversations 同库）
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone():
+                funnel_rows = db.execute(
+                    "SELECT status, COUNT(*) AS n FROM jobs "
+                    "WHERE status IN ('已投','笔试','面试','OC','挂') GROUP BY status"
+                ).fetchall()
+                fmap = {r["status"]: r["n"] for r in funnel_rows}
+                data["funnel"] = [{"label": s, "value": fmap.get(s, 0)}
+                                  for s in ("已投", "笔试", "面试", "OC", "挂")]
+
+            # 工具调用健康摘要（来自 traces 表）
+            agg = db.execute(
+                "SELECT COUNT(*) AS n, SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errs, "
+                "AVG(duration_ms) AS avg_ms FROM traces"
+            ).fetchone()
+            data["traces_summary"] = {
+                "total": agg["n"] or 0,
+                "errors": agg["errs"] or 0,
+                "error_rate": round((agg["errs"] or 0) / (agg["n"] or 1), 3),
+                "avg_ms": round(agg["avg_ms"] or 0, 1),
+            }
+
+            # 结构化用户画像（画像中心卡片展示/编辑）
+            data["user_profile"] = load_profile()
     except Exception as e:
         data["db_error"] = str(e)
 
@@ -2561,6 +2675,74 @@ def _dashboard_data() -> dict:
 @app.get("/api/dashboard")
 async def dashboard_api():
     return _dashboard_data()
+
+
+@app.get("/api/demo/summary")
+async def demo_summary():
+    """演示页用的轻量聚合数据：不返回 5000+ 岗位全文，避免首屏拖慢。"""
+    with get_db() as db:
+        has_jobs = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
+        ).fetchone() is not None
+        if has_jobs:
+            total_jobs = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+            status_rows = db.execute(
+                "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"
+            ).fetchall()
+            status_counts = {r["status"]: r["n"] for r in status_rows}
+            source_rows = db.execute(
+                "SELECT source, COUNT(*) AS n FROM jobs GROUP BY source ORDER BY n DESC LIMIT 8"
+            ).fetchall()
+            top_rows = db.execute(
+                "SELECT company,title,city,match_score,status,url,source FROM jobs "
+                "WHERE user_hidden=0 ORDER BY match_score DESC LIMIT 5"
+            ).fetchall()
+            high_match = db.execute(
+                "SELECT COUNT(*) FROM jobs WHERE user_hidden=0 AND match_score>=75"
+            ).fetchone()[0]
+        else:
+            # 全新安装、尚未扫岗位时也要能打开 Demo，而不是 500。
+            total_jobs, status_counts, source_rows, top_rows, high_match = 0, {}, [], [], 0
+        reports = db.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
+        conversations = db.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+        traces = db.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+        avg_ms = db.execute("SELECT AVG(duration_ms) FROM traces").fetchone()[0] or 0
+        latest_report = db.execute(
+            "SELECT created_at FROM reports ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    applied = sum(status_counts.get(s, 0) for s in ("已投", "笔试", "面试", "OC"))
+    return {
+        "generated_at": _now_local(),
+        "jobs": {
+            "total": total_jobs,
+            "high_match": high_match,
+            "status_counts": status_counts,
+            "applied": applied,
+            "tests": status_counts.get("笔试", 0),
+            "interviews": status_counts.get("面试", 0),
+            "offers": status_counts.get("OC", 0),
+        },
+        "sources": [{"name": r["source"], "count": r["n"]} for r in source_rows],
+        "top_jobs": [
+            {
+                "company": r["company"],
+                "title": r["title"],
+                "city": r["city"],
+                "score": r["match_score"],
+                "status": r["status"],
+                "url": r["url"],
+                "source": r["source"],
+            }
+            for r in top_rows
+        ],
+        "activity": {
+            "reports": reports,
+            "conversations": conversations,
+            "traces": traces,
+            "avg_trace_ms": round(float(avg_ms), 1),
+            "latest_report": latest_report["created_at"] if latest_report else None,
+        },
+    }
 
 
 @app.get("/api/dashboard/report/{report_id}")
@@ -2626,7 +2808,17 @@ async def traces_page():
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_page():
     p = static_dir / "dashboard.html"
-    return HTMLResponse(p.read_text("utf-8") if p.exists() else "<h1>Hermes Dashboard</h1>")
+    # 注入 WEB_TOKEN：画像编辑（POST /api/user-profile）需要鉴权
+    return HTMLResponse(
+        p.read_text("utf-8").replace("__WEB_TOKEN__", WEB_TOKEN) if p.exists()
+        else "<h1>Hermes Dashboard</h1>"
+    )
+
+
+@app.get("/demo", response_class=HTMLResponse)
+async def demo_page():
+    p = static_dir / "demo.html"
+    return HTMLResponse(p.read_text("utf-8") if p.exists() else "<h1>Hermes Sentinel Demo</h1>")
 
 
 # ============================================================
@@ -3020,6 +3212,75 @@ async def api_profile_suggest(kw: str = ""):
     """关键词/专业 → 推荐相关方向类别。前端「写AI开发→推荐相关方向」用。"""
     from job_sentinel.matcher import suggest_directions
     return {"directions": suggest_directions(kw)}
+
+
+# ── 用户画像（user_profile 表）读写：画像中心 UI 用 ──
+@app.get("/api/user-profile")
+async def api_user_profile_get():
+    """读结构化用户画像 + 可编辑字段白名单（画像中心卡片用）。"""
+    return {"profile": load_profile(), "allowed_keys": sorted(_PROFILE_ALLOWED_KEYS)}
+
+
+@app.post("/api/user-profile", dependencies=[Depends(require_auth)])
+async def api_user_profile_post(request: Request):
+    """批量更新结构化用户画像（仅白名单字段；空值跳过并说明原因）。"""
+    try:
+        data = await request.json()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="请求体不是合法 JSON")
+    updates = (data or {}).get("updates")
+    if not isinstance(updates, dict) or not updates:
+        raise HTTPException(status_code=400, detail="缺少 updates 字段（{字段: 值} 字典）")
+    applied, rejected = {}, []
+    for k, v in updates.items():
+        k = str(k).strip()
+        v = str(v).strip()
+        if k not in _PROFILE_ALLOWED_KEYS:
+            rejected.append(f"{k}（不在白名单）")
+            continue
+        if not v:
+            rejected.append(f"{k}（空值）")
+            continue
+        update_profile(k, v)
+        applied[k] = v
+    return {"ok": True, "applied": applied, "rejected": rejected}
+
+
+# ── 聊天历史：index 页刷新后恢复对话视图 ──
+@app.get("/api/history", dependencies=[Depends(require_auth)])
+async def api_history(session_id: str = "default", limit: int = 60):
+    """返回指定会话的历史消息（不含 tool 中间产物），按时间正序渲染。"""
+    limit = max(1, min(limit, 200))
+    return {"session_id": session_id, "messages": load_history(session_id, limit)}
+
+
+# ── 岗位轻量汇总：jobs 页统计角标专用（不回岗位明细，避免全量拉取放大） ──
+@app.get("/api/jobs/stats")
+async def api_jobs_stats():
+    """分档计数 / 状态分布 / 来源分布 / 免笔试与官方直链计数。"""
+    from job_sentinel.store import get_db as js_get_db, job_stats
+    with js_get_db(str(DB_PATH)) as c:
+        base = job_stats(c)
+        n = lambda sql: c.execute(sql).fetchone()[0]  # noqa: E731
+        tiers = {
+            "hi": n("SELECT COUNT(*) FROM jobs WHERE match_score >= 75"),
+            "mid": n("SELECT COUNT(*) FROM jobs WHERE match_score >= 60 AND match_score < 75"),
+            "ok": n("SELECT COUNT(*) FROM jobs WHERE match_score >= 45 AND match_score < 60"),
+            "obs": n("SELECT COUNT(*) FROM jobs WHERE match_score < 45"),
+        }
+        sources = {r["source"]: r["n"] for r in
+                   c.execute("SELECT source, COUNT(*) n FROM jobs GROUP BY source ORDER BY n DESC LIMIT 10")}
+        exam_free = n("SELECT COUNT(*) FROM jobs WHERE exam_free = '免笔试'")
+        official_links = n("SELECT COUNT(*) FROM jobs WHERE link_type IN ('官方网申', '简章详情')")
+    return {
+        "total": base["total"],
+        "by_status": base["by_status"],
+        "new": base["new"],
+        "tiers": tiers,
+        "sources": sources,
+        "exam_free": exam_free,
+        "official_links": official_links,
+    }
 
 
 # ============================================================

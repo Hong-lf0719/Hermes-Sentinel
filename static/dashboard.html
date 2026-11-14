@@ -4,98 +4,64 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Hermes Dashboard</title>
+<link rel="stylesheet" href="/static/common.css">
 <style>
-  :root {
-    --bg: #1a1a2e;
-    --surface: #16213e;
-    --primary: #0f3460;
-    --accent: #e94560;
-    --text: #eaeaea;
-    --text-muted: #888;
-    --border: #2a2a4a;
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-    padding: 16px;
-    max-width: 1080px;
-    margin: 0 auto;
-  }
-  .topbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 18px;
-    flex-wrap: wrap;
-    gap: 10px;
-  }
-  .topbar h1 { font-size: 20px; display: flex; align-items: center; gap: 8px; }
-  .topbar h1 span { color: var(--accent); }
-  .btn {
-    background: none; border: 1px solid var(--border); color: var(--text);
-    padding: 8px 14px; border-radius: 8px; font-size: 13px; cursor: pointer;
-    text-decoration: none; display: inline-block;
-  }
-  .btn:hover { border-color: var(--accent); }
-  .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
-  .stat {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    padding: 16px; text-align: center;
-  }
-  .stat .num { font-size: 30px; font-weight: 700; color: var(--accent); }
-  .stat .label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
-  .card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    padding: 16px; margin-bottom: 16px;
-  }
-  .card h2 { font-size: 15px; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; color: var(--text); }
-  .card h2 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
-  .kv { display: flex; justify-content: space-between; font-size: 13px; padding: 5px 0; border-bottom: 1px solid var(--border); }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--txt); min-height: 100vh; max-width: 1080px; margin: 0 auto; padding: 14px 16px; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
+  .topbar h1 { font-size: 19px; display: flex; align-items: center; gap: 8px; margin: 0; }
+  .btn { background: var(--card2); border: 1px solid var(--line); color: var(--txt);
+         padding: 7px 13px; border-radius: 8px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-block; }
+  .btn:hover { border-color: var(--acc); }
+  .btn.primary { background: var(--acc); color: #04293a; border-color: var(--acc); font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 15px; margin-bottom: 14px; }
+  .card h2 { font-size: 14px; margin: 0 0 12px; color: var(--txt); }
+  .card h2 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); display: inline-block; margin-right: 6px; }
+  .kv { display: flex; justify-content: space-between; font-size: 13px; padding: 5px 0; border-bottom: 1px solid var(--line); }
   .kv:last-child { border-bottom: none; }
-  .kv .k { color: var(--text-muted); }
-  .kv .v { color: var(--text); font-family: 'SF Mono', monospace; }
-  .tool-item { padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .kv .k { color: var(--sub); }
+  .kv .v { color: var(--txt); font-family: 'SF Mono', Consolas, monospace; }
+  .tool-item { padding: 9px 0; border-bottom: 1px solid var(--line); }
   .tool-item:last-child { border-bottom: none; }
-  .tool-name { color: #4a8fe7; font-weight: 600; font-size: 14px; font-family: 'SF Mono', monospace; }
-  .tool-desc { color: var(--text-muted); font-size: 12px; margin-top: 2px; line-height: 1.4; }
-  .usage-bar { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; }
-  .usage-bar .name { width: 160px; color: #4a8fe7; font-family: 'SF Mono', monospace; font-size: 12px; }
-  .usage-bar .track { flex: 1; background: var(--bg); border-radius: 6px; height: 8px; overflow: hidden; }
-  .usage-bar .fill { height: 100%; background: var(--accent); border-radius: 6px; }
-  .usage-bar .cnt { width: 32px; text-align: right; color: var(--text-muted); }
-  .msg { padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .tool-name { color: #7dd3fc; font-weight: 600; font-size: 13.5px; font-family: Consolas, monospace; }
+  .tool-desc { color: var(--sub); font-size: 12px; margin-top: 2px; line-height: 1.4; }
+  .msg { padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
   .msg:last-child { border-bottom: none; }
   .badge { display: inline-block; padding: 1px 7px; border-radius: 5px; font-size: 11px; font-weight: 600; margin-right: 6px; }
-  .badge.user { background: var(--primary); color: #4a8fe7; }
-  .badge.assistant { background: rgba(233,69,96,0.2); color: var(--accent); }
-  .badge.tool { background: rgba(136,136,136,0.2); color: var(--text-muted); }
-  .msg .meta { color: var(--text-muted); font-size: 11px; }
-  .msg .body { margin-top: 3px; color: var(--text); word-break: break-word; line-height: 1.5; }
-  .report-item { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .badge.user { background: #0c4a6e; color: #7dd3fc; }
+  .badge.assistant { background: #164e63; color: #67e8f9; }
+  .badge.tool { background: var(--card2); color: var(--sub); }
+  .msg .meta { color: var(--sub); font-size: 11px; }
+  .msg .body { margin-top: 3px; color: var(--txt); word-break: break-word; line-height: 1.5; }
+  .report-item { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line); }
   .report-item:last-child { border-bottom: none; }
-  .report-item .info { font-size: 13px; }
-  .report-item .type { color: var(--accent); font-weight: 600; }
-  .report-item .time { color: var(--text-muted); font-size: 11px; }
-  .empty { color: var(--text-muted); font-size: 13px; padding: 12px 0; text-align: center; }
-  .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 100; }
+  .report-item .type { color: var(--acc); font-weight: 600; font-size: 13px; }
+  .report-item .time { color: var(--sub); font-size: 11px; }
+  .empty { color: var(--sub); font-size: 13px; padding: 12px 0; text-align: center; }
+  .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 100; }
   .modal.open { display: block; }
   .modal iframe { width: 100%; height: 100%; border: none; background: #fff; }
   .modal .close { position: absolute; top: 14px; right: 18px; color: #fff; font-size: 26px; cursor: pointer; z-index: 101; }
-  .loading { text-align: center; color: var(--text-muted); padding: 30px; }
+  .loading { text-align: center; color: var(--sub); padding: 30px; }
+  /* 我的画像卡片 */
+  .prof-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+  .prof-item label { display: block; font-size: 11.5px; color: var(--sub); margin-bottom: 4px; }
+  .prof-item input { width: 100%; padding: 8px 9px; background: var(--card2); border: 1px solid var(--line);
+                     border-radius: 8px; color: var(--txt); font-size: 13px; }
+  .prof-item input:focus { border-color: var(--acc); outline: none; }
+  .prof-item.dirty input { border-color: var(--warn); }
+  .prof-foot { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .prof-foot .hint { font-size: 11.5px; color: var(--sub); }
+  .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .chart-row { grid-template-columns: 1fr; } }
+  .summary-chips { display: flex; gap: 10px; flex-wrap: wrap; }
 </style>
 </head>
 <body>
 
 <div class="topbar">
-  <h1><span>📊</span> Hermes Dashboard</h1>
-  <div style="display:flex;gap:8px;">
-    <a class="btn" href="/">← 返回聊天</a>
-    <button class="btn btn-primary" onclick="load()">↻ 刷新</button>
-  </div>
+  <h1>📊 Hermes Dashboard</h1>
+  <button class="btn primary" onclick="load()">↻ 刷新</button>
 </div>
 
 <div id="content">
@@ -107,20 +73,23 @@
   <iframe id="reportFrame" src=""></iframe>
 </div>
 
+<script src="/static/common.js"></script>
 <script>
+const { esc, toast, api, renderNav, funnelChart, barChart, lineChart } = HermesUI;
 const REP_TYPE_LABEL = { daily: "AI 日报", job: "求职报告" };
+let PROFILE_KEYS = [];
 
 async function load() {
   const el = document.getElementById('content');
   el.innerHTML = '<div class="loading">加载中…</div>';
   try {
-    const r = await fetch('/api/dashboard');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const d = await r.json();
+    const d = await api('/api/dashboard');
     el.innerHTML = render(d);
     bindReportButtons();
+    renderCharts(d);
+    bindProfileEditor(d.user_profile || {});
   } catch (e) {
-    el.innerHTML = '<div class="empty">加载失败：' + e.message + '</div>';
+    el.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
   }
 }
 
@@ -131,6 +100,7 @@ function render(d) {
   const usage = d.tool_usage || [];
   const recent = d.recent || [];
   const reports = d.reports || [];
+  const ts = d.traces_summary || { total: 0, errors: 0, error_rate: 0, avg_ms: 0 };
 
   const stats = [
     { num: conv.messages, label: "对话消息" },
@@ -139,44 +109,48 @@ function render(d) {
     { num: kb.chunks ?? "—", label: "知识库片段" },
     { num: tools.length, label: "可用工具" },
     { num: reports.length, label: "日报存档" },
+    { num: ts.total, label: "工具调用 Trace" },
+    { num: (ts.error_rate * 100).toFixed(1) + "%", label: "调用错误率" },
   ];
 
-  let html = '<div class="grid">';
+  let html = '<div class="hs-stat-grid">';
   for (const s of stats) {
-    html += `<div class="stat"><div class="num">${s.num}</div><div class="label">${s.label}</div></div>`;
+    html += `<div class="hs-stat"><div class="n">${esc(String(s.num))}</div><div class="t">${esc(s.label)}</div></div>`;
   }
+  html += '</div><div style="height:14px"></div>';
+
+  // 投递漏斗 + 近 7 日消息趋势（SVG 图表并排）
+  html += '<div class="chart-row">';
+  html += '<div class="card"><h2><span class="dot"></span>投递漏斗</h2><div id="chartFunnel" class="hs-chart"></div></div>';
+  html += '<div class="card"><h2><span class="dot"></span>近 7 日对话趋势</h2><div id="chartTrend" class="hs-chart"></div></div>';
   html += '</div>';
 
-  // 知识库
+  // 工具调用排行
+  html += '<div class="card"><h2><span class="dot"></span>工具调用排行</h2>';
+  html += '<div id="chartUsage" class="hs-chart"></div>';
+  html += '</div>';
+
+  // 我的画像（可编辑）
+  html += '<div class="card"><h2><span class="dot"></span>我的画像 <small style="color:var(--sub);font-weight:400">—— 聊天里的"记住我是…"和这里改的是同一份数据</small></h2>';
+  html += '<div id="profileBox" class="prof-grid"></div>';
+  html += '<div class="prof-foot"><button class="btn primary" id="profSave">保存修改</button>'
+        + '<span class="hint" id="profHint">修改后点保存，立即对 Agent 生效</span></div>';
+  html += '</div>';
+
+  // 长期知识库
   html += '<div class="card"><h2><span class="dot"></span>长期知识库（RAG）</h2>';
   if (kb.error) {
-    html += `<div class="empty">读取失败：${kb.error}</div>`;
+    html += `<div class="empty">读取失败：${esc(kb.error)}</div>`;
   } else {
-    html += kv("文档数", kb.docs);
-    html += kv("片段数", kb.chunks);
-    html += kv("嵌入模型", kb.embedding);
-    html += kv("向量维度", kb.dim);
-    html += kv("存储路径", kb.path);
+    html += kv("文档数", kb.docs) + kv("片段数", kb.chunks)
+          + kv("嵌入模型", kb.embedding) + kv("向量维度", kb.dim) + kv("存储路径", kb.path);
   }
   html += '</div>';
 
-  // 工具清单
+  // 可用工具
   html += '<div class="card"><h2><span class="dot"></span>可用工具（' + tools.length + '）</h2>';
   for (const t of tools) {
     html += `<div class="tool-item"><div class="tool-name">${esc(t.name)}</div><div class="tool-desc">${esc(t.description)}</div></div>`;
-  }
-  html += '</div>';
-
-  // 工具调用记录
-  html += '<div class="card"><h2><span class="dot"></span>工具调用记录</h2>';
-  if (usage.length === 0) {
-    html += '<div class="empty">暂无工具调用记录（和 Hermes 对话并触发工具后即出现）</div>';
-  } else {
-    const max = Math.max(...usage.map(u => u.count));
-    for (const u of usage) {
-      const pct = max ? Math.round(u.count / max * 100) : 0;
-      html += `<div class="usage-bar"><span class="name">${esc(u.tool)}</span><span class="track"><span class="fill" style="width:${pct}%"></span></span><span class="cnt">${u.count}</span></div>`;
-    }
   }
   html += '</div>';
 
@@ -187,7 +161,7 @@ function render(d) {
   } else {
     for (const rp of reports) {
       const label = REP_TYPE_LABEL[rp.type] || rp.type;
-      html += `<div class="report-item"><div class="info"><span class="type">${label}</span> <span class="time">${rp.created_at}</span></div><button class="btn" data-report="${rp.id}">查看</button></div>`;
+      html += `<div class="report-item"><div class="info"><span class="type">${esc(label)}</span> <span class="time">${esc(rp.created_at)}</span></div><button class="btn" data-report="${esc(rp.id)}">查看</button></div>`;
     }
   }
   html += '</div>';
@@ -199,7 +173,7 @@ function render(d) {
   } else {
     for (const m of recent) {
       const label = m.role === 'user' ? '你' : (m.role === 'assistant' ? 'Hermes' : '工具');
-      html += `<div class="msg"><span class="badge ${m.role}">${label}</span><span class="meta">${m.created_at}</span><div class="body">${esc(m.content)}</div></div>`;
+      html += `<div class="msg"><span class="badge ${esc(m.role)}">${esc(label)}</span><span class="meta">${esc(m.created_at)}</span><div class="body">${esc(m.content)}</div></div>`;
     }
   }
   html += '</div>';
@@ -207,13 +181,55 @@ function render(d) {
   return html;
 }
 
-function kv(k, v) {
-  return `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(String(v))}</span></div>`;
+function renderCharts(d) {
+  const funnel = (d.funnel || []).map(f => ({ label: f.label, value: f.value }));
+  if (funnel.length) funnelChart(document.getElementById('chartFunnel'), funnel);
+  else document.getElementById('chartFunnel').innerHTML = '<div class="hs-empty">暂无投递数据</div>';
+
+  const trend = d.trend || [];
+  if (trend.length) lineChart(document.getElementById('chartTrend'), trend, { height: 170 });
+
+  const usage = (d.tool_usage || []).map(u => ({ label: u.tool, value: u.count }));
+  if (usage.length) barChart(document.getElementById('chartUsage'), usage);
+  else document.getElementById('chartUsage').innerHTML = '<div class="hs-empty">暂无工具调用记录</div>';
 }
 
-function esc(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+/* ── 我的画像：行内编辑 + 批量保存 ── */
+function bindProfileEditor(profile) {
+  PROFILE_KEYS = Object.keys(profile);
+  const box = document.getElementById('profileBox');
+  box.innerHTML = PROFILE_KEYS.map(k =>
+    `<div class="prof-item" data-key="${esc(k)}"><label>${esc(k)}</label>`
+    + `<input value="${esc(profile[k])}" placeholder="未设置"></div>`).join('');
+
+  box.querySelectorAll('input').forEach(inp => {
+    inp.addEventListener('input', () => inp.closest('.prof-item').classList.add('dirty'));
+  });
+
+  document.getElementById('profSave').onclick = async () => {
+    const updates = {};
+    box.querySelectorAll('.prof-item').forEach(item => {
+      const k = item.getAttribute('data-key');
+      const v = item.querySelector('input').value.trim();
+      if (item.classList.contains('dirty') && v && v !== profile[k]) updates[k] = v;
+    });
+    if (!Object.keys(updates).length) { toast('没有需要保存的修改'); return; }
+    try {
+      const r = await api('/api/user-profile', {
+        method: 'POST',
+        body: JSON.stringify({ updates })
+      });
+      if (r.rejected && r.rejected.length) toast('部分字段被拒：' + r.rejected.join('、'), true);
+      else toast('画像已保存，立即对 Agent 生效');
+      bindProfileEditor(Object.assign({}, profile, r.applied || {}));
+    } catch (e) {
+      toast('保存失败：' + e.message, true);
+    }
+  };
+}
+
+function kv(k, v) {
+  return `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(String(v == null ? '—' : v))}</span></div>`;
 }
 
 function bindReportButtons() {
@@ -231,6 +247,7 @@ function closeModal() {
   document.getElementById('reportFrame').src = '';
 }
 
+renderNav('dashboard');
 load();
 </script>
 </body>

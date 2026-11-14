@@ -4,20 +4,21 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Hermes Sentinel</title>
+<link rel="stylesheet" href="/static/common.css">
 <style>
   :root {
-    --bg: #212121;
-    --surface: #2f2f2f;
-    --surface-hover: #3a3a3a;
-    --text: #ececec;
-    --text-secondary: #b4b4b4;
-    --text-muted: #8e8e8e;
-    --border: #444;
-    --accent: #10a37f;
-    --accent-hover: #0d8c6d;
-    --user-bg: #3a3a3a;
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface-hover: #273449;
+    --text: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --border: #334155;
+    --accent: #38bdf8;
+    --accent-hover: #0ea5e9;
+    --user-bg: #1e293b;
     --error: #ef4444;
-    --code-bg: #1e1e1e;
+    --code-bg: #0b1426;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -121,6 +122,29 @@
     font-size: 13px;
     color: var(--text-muted);
     line-height: 1.6;
+  }
+  .quick-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 16px;
+  }
+  .quick-chip {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: 999px;
+    padding: 7px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: inherit;
+  }
+  .quick-chip:hover {
+    border-color: var(--accent);
+    color: var(--text);
+    background: var(--surface-hover);
   }
 
   /* ===== 消息行 ===== */
@@ -413,12 +437,20 @@
     .header { padding: 8px 12px; }
     .header h1 { font-size: 13px; }
   }
+
+  /* ===== 共享层：复制按钮 ===== */
+  .copy-btn {
+    background: transparent; border: none; color: var(--text-muted);
+    font-size: 11px; cursor: pointer; padding: 2px 0; opacity: 0; transition: opacity .15s;
+  }
+  .message-content:hover .copy-btn { opacity: 1; }
 </style>
 </head>
 <body>
 
 <div class="header">
   <h1>Hermes Sentinel</h1>
+  <a href="/demo" style="margin-left:10px;color:#38bdf8;font-size:13px;text-decoration:none;font-weight:600;vertical-align:middle;">✨ Demo</a>
   <a href="/jobs" style="margin-left:10px;color:#38bdf8;font-size:13px;text-decoration:none;font-weight:600;vertical-align:middle;">🎯 岗位哨兵</a>
   <div class="header-btns">
     <select id="directionSelect" class="direction-select" onchange="onDirectionChange(this.value)" title="选择你的方向，日报将基于此定制">
@@ -445,7 +477,13 @@
   <div class="chat-container" id="chatContainer">
     <div class="welcome">
       <div class="welcome-title">Hermes Sentinel</div>
-      <div class="welcome-sub">多渠道 AI 助手 · Email / Web · RAG 长期记忆<br>💬 对话 · 📊 日报 · 🔍 搜索 · 💻 控制电脑</div>
+      <div class="welcome-sub">多渠道 AI 助手 · Email / Web · RAG 长期记忆<br>💬 对话 · 📊 日报 · 🔍 搜索 · 🎯 岗位哨兵</div>
+      <div class="quick-actions">
+        <button class="quick-chip" onclick="quickAsk('扫描武汉 AI/Agent 方向的校招岗位，按匹配分排序')">🎯 扫武汉 AI 岗位</button>
+        <button class="quick-chip" onclick="quickAsk('生成本周 AI/Agent 方向的情报日报')">📊 生成今日情报日报</button>
+        <button class="quick-chip" onclick="quickAsk('分析我当前的投递漏斗，指出下一步最该补什么')">📈 分析投递漏斗</button>
+        <button class="quick-chip" onclick="quickAsk('用 1 分钟介绍你的架构、工具调用和评测方式')">🧩 介绍项目架构</button>
+      </div>
     </div>
   </div>
 </div>
@@ -459,11 +497,27 @@
   </div>
 </div>
 
+<div class="toast" id="toast"></div>
+
+<script src="/static/common.js"></script>
 <script>
 const chatArea = document.getElementById('chatArea');
 const chatContainer = document.getElementById('chatContainer');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('sendBtn');
+HermesUI.renderNav('chat');
+
+// ===== 刷新后恢复历史对话（后端 conversations 表） =====
+async function restoreHistory() {
+  try {
+    const d = await HermesUI.api('/api/history?session_id=' + encodeURIComponent(SESSION_ID) + '&limit=60');
+    const msgs = d.messages || [];
+    if (!msgs.length) return;
+    for (const m of msgs) addMessage(m.content, m.role === 'assistant' ? 'ai' : 'user');
+    scrollToBottom(false);
+  } catch (e) { /* 无历史或加载失败时保持欢迎页 */ }
+}
+document.addEventListener('DOMContentLoaded', restoreHistory);
 
 let isProcessing = false;
 let autoScroll = true;
@@ -535,12 +589,27 @@ function addMessage(content, role) {
   }
 
   contentDiv.appendChild(bubble);
+  addCopyButton(contentDiv, () => content);
   row.appendChild(avatar);
   row.appendChild(contentDiv);
   chatContainer.appendChild(row);
 
   if (autoScroll) scrollToBottom();
   return bubble;
+}
+
+// ===== 复制按钮：悬停出现在气泡下方 =====
+function addCopyButton(contentDiv, getText) {
+  const btn = document.createElement('button');
+  btn.className = 'copy-btn';
+  btn.textContent = '复制';
+  btn.onclick = () => {
+    navigator.clipboard?.writeText(getText()).then(() => {
+      btn.textContent = '已复制';
+      setTimeout(() => btn.textContent = '复制', 1200);
+    }).catch(() => {});
+  };
+  contentDiv.appendChild(btn);
 }
 
 // ===== 添加错误消息 =====
@@ -850,6 +919,7 @@ async function sendMessage() {
               } else {
                 const finalText = ev.text || fullText;
                 bubble.innerHTML = renderMarkdown(finalText);
+                addCopyButton(contentDiv, () => ev.text || fullText);
               }
             } else if (ev.type === 'error') {
               firstToken = false;
@@ -896,6 +966,7 @@ async function sendMessage() {
           bubble.innerHTML = `<div class="report-html">${finalHtml}</div>`;
         } else {
           bubble.innerHTML = renderMarkdown(finalText || fullText || '(无回复)');
+          addCopyButton(contentDiv, () => finalText || fullText || '');
         }
       } catch (textErr) {
         bubble.innerHTML = `<div class="error-bubble">⚠️ 解析响应失败: ${textErr.message}</div>`;
@@ -930,6 +1001,11 @@ async function resetChat() {
 
 function quickReport() {
   input.value = '发日报';
+  sendMessage();
+}
+
+function quickAsk(text) {
+  input.value = text;
   sendMessage();
 }
 

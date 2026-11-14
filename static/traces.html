@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>可观测性 Trace · Hermes Sentinel</title>
+<link rel="stylesheet" href="/static/common.css">
 <style>
   :root{
     --bg:#0f172a; --card:#1e293b; --card2:#273449; --line:#334155;
@@ -70,9 +71,11 @@
 <div class="stats" id="stats"></div>
 <div class="list" id="list"><div class="empty">加载中…</div></div>
 
+<script src="/static/common.js"></script>
 <script>
-const TOKEN = "__WEB_TOKEN__";
-const api = (q) => `/api/traces?token=${encodeURIComponent(TOKEN)}&${q}`;
+const { esc } = HermesUI;
+renderNav("traces");
+const traceUrl = (q) => "/api/traces?" + q;
 const fmt = (ms) => ms == null ? "—" : (ms >= 1000 ? (ms/1000).toFixed(2)+"s" : Math.round(ms)+"ms");
 
 async function load(){
@@ -88,8 +91,7 @@ async function load(){
   const list = document.getElementById("list");
   list.innerHTML = '<div class="empty">加载中…</div>';
   try{
-    const r = await fetch(api(q.toString()));
-    const data = await r.json();
+    const data = await HermesUI.api(traceUrl(q.toString()));
     renderStats(data.summary);
     if(!data.traces.length){ list.innerHTML = '<div class="empty">没有匹配的 trace 记录</div>'; return; }
     list.innerHTML = data.traces.map(renderRow).join("");
@@ -134,7 +136,6 @@ function renderRow(t){
   </div>`;
 }
 
-function esc(s){ return String(s==null?"":s).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 load();
 </script>
 </body>
