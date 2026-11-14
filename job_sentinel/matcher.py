@@ -34,6 +34,16 @@ INDUSTRY_BLACKLIST = (
     "教师", "教务", "护士", "医师", "翻译",
 )
 
+# 占位公司名黑名单：来源站把真实雇主藏在付费墙/登录后，采集到的"公司名"
+# 只是占位符——无法归因到具体公司（公司聚合/归一化都会退化成噪音），
+# 对投递决策零价值，直接丢弃。集合形式，后续发现新占位词在此增量。
+# 实测：实习僧付费墙占位「会员可见」单次扫描可产出 270+ 条，严重刷屏。
+PLACEHOLDER_COMPANIES = {
+    "会员可见",        # 实习僧付费墙占位
+    "公司名称未公开",
+    "匿名公司",
+}
+
 # 岗位标题里出现即视为非技术岗（比黑名单更精准，仅看 title）
 TITLE_BLACKLIST = (
     "管培生", "储备干部", "市场营销", "品牌", "公关", "供应链管理",
@@ -627,6 +637,10 @@ def edu_score(job: Job, profile: dict) -> tuple[int, str]:
 def hard_filter(job: Job, profile: dict) -> bool:
     """三级过滤。任一不过直接丢弃，不进入打分与入库。"""
     blob = _norm(f"{job.company} {job.title} {job.industry} {job.major}")
+
+    # 0. 占位公司名（来源站隐藏真实雇主，无法归因）
+    if (job.company or "").strip() in PLACEHOLDER_COMPANIES:
+        return False
 
     # 1. 行业黑名单
     if any(k in blob for k in INDUSTRY_BLACKLIST):
