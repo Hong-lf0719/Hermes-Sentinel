@@ -102,6 +102,28 @@
   .exam-free{font-style:normal;font-size:11px;padding:2px 7px;border-radius:20px;margin-left:6px;vertical-align:middle;font-weight:700;background:#14532d;color:#4ade80}
   .exam-yes{font-style:normal;font-size:11px;padding:2px 7px;border-radius:20px;margin-left:6px;vertical-align:middle;font-weight:600;background:var(--card2);color:#94a3b8}
   .empty{text-align:center;color:var(--sub);padding:40px 20px;line-height:1.7}
+  /* 公司聚合视图：组头 + 最高分完整卡 + 其余折叠行 */
+  .cgroup{margin-bottom:18px}
+  .cgroup-head{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--card2);
+    border:1px solid var(--line);border-radius:10px 10px 0 0;flex-wrap:wrap}
+  .cg-co{font-weight:800;font-size:14.5px;color:var(--txt)}
+  .cg-meta{font-size:11.5px;color:var(--sub)}
+  .cgroup .card{border-radius:0 0 14px 14px;border-top:none;margin:0}
+  .cgroup .more-jobs{background:var(--card);border:1px solid var(--line);border-top:none;
+    border-radius:0 0 14px 14px;padding:4px 10px 8px}
+  .cgroup .more-jobs[open]{padding-bottom:10px}
+  .more-jobs summary{cursor:pointer;color:var(--acc);font-size:12px;font-weight:600;padding:5px 0;user-select:none}
+  .more-jobs summary:hover{color:var(--txt)}
+  .mini-row{display:flex;align-items:center;gap:8px;padding:6px 4px;font-size:12.5px;
+    border-bottom:1px solid rgba(51,65,85,.45)}
+  .mini-row:last-child{border-bottom:none}
+  .mini-score{flex:0 0 auto;width:34px;text-align:center;font-weight:800;color:var(--acc);
+    background:var(--card2);border-radius:6px;padding:2px 0;font-family:ui-monospace,monospace}
+  .mini-main{flex:1;min-width:0;color:var(--txt);cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mini-main:hover{color:var(--acc)}
+  .mini-status{flex:0 0 auto;color:var(--sub);font-size:11px}
+  .mini-exp{flex:0 0 auto;background:var(--card2);color:var(--sub);border:1px solid var(--line);
+    border-radius:6px;padding:3px 8px;font-size:11px;font-weight:500}
   /* 设置弹窗 */
   .mask{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
   .mask.on{display:flex}
@@ -169,6 +191,7 @@
   </select>
   <select id="f-source" onchange="loadJobs()"><option value="">全部来源</option></select>
   <input type="text" id="f-kw" placeholder="🔍 搜公司 / 职位…" oninput="loadJobs()" style="min-width:130px">
+  <button class="btn-set" id="f-group" onclick="toggleGroup()" title="同一公司的多个岗位合并为一组，只展开最高分岗位">🏢 公司聚合</button>
   <button class="btn-set" id="f-urgent" onclick="toggleUrgent()">⏰ 7天内截止</button>
   <button class="btn-set" id="f-region" onclick="toggleRegion()">📍 只看目标地区</button>
   <button class="btn-set" id="f-pfocus" onclick="toggleProfileFocus()">🎯 按画像聚焦</button>
@@ -280,6 +303,8 @@ HermesUI.renderNav("jobs");
 const STATUSES = ["新","已看","已投","笔试","面试","挂","OC"];
 let onlyReal = false;  // 只看真实投递（状态已推进 或 浏览器扩展主动投的）
 let urgentOnly = false;  // 只看 7 天内截止
+let groupByCompany = true;  // 公司聚合：同公司合并为一组（默认开，缓解大国企刷屏）
+let GROUP_INDEX = {};       // hash → job，供折叠行展开成完整卡片
 let onlyRegion = true;   // 默认开：画像有目标地区则默认只显示目标地区（解决「没标北京却满屏北京」）
 let profileFocus = false;  // 按画像聚焦（求职方向/专业/招聘类型 硬过滤岗位集）
 let eduFilter = true;    // 默认开：自身本科则默认隐藏需硕士岗（看板聚焦开关）
@@ -291,6 +316,7 @@ function saveFilters(){
   try{
     localStorage.setItem(LS_KEY, JSON.stringify({
       onlyRegion, profileFocus, urgentOnly, onlyReal, eduFilter,
+      group: groupByCompany,
       tier: document.getElementById("f-tier").value,
       sort: document.getElementById("f-sort").value,
       source: document.getElementById("f-source").value,
@@ -310,6 +336,7 @@ function loadFilters(){
     if(!s) return false;
     onlyRegion=!!s.onlyRegion; profileFocus=!!s.profileFocus; urgentOnly=!!s.urgentOnly;
     onlyReal=!!s.onlyReal; eduFilter=!!s.eduFilter;
+    groupByCompany=(s.group===undefined)?true:!!s.group;   // 首次无记录 → 默认开启聚合
     const set=(id,v)=>{const e=document.getElementById(id); if(e&&v!=null)e.value=v;};
     set("f-tier",s.tier); set("f-sort",s.sort); set("f-source",s.source);
     set("f-batch",s.batch); set("f-status",s.status); set("f-ent",s.ent);
@@ -322,6 +349,7 @@ function applyToggleClasses(){
   document.getElementById("f-region").classList.toggle("on",onlyRegion);
   document.getElementById("f-pfocus").classList.toggle("on",profileFocus);
   document.getElementById("f-real").classList.toggle("on",onlyReal);
+  const gb=document.getElementById("f-group"); if(gb) gb.classList.toggle("on",groupByCompany);
   const eb=document.getElementById("f-edu"); if(eb) eb.classList.toggle("on",eduFilter);
 }
 let MY_REGIONS = [];     // 画像地区（用于卡片「外地」标识 / 三不中判断）
@@ -385,8 +413,57 @@ async function loadJobs(){
   if(kw)d.jobs=d.jobs.filter(j=>(j.company||"").toLowerCase().indexOf(kw)>=0||(j.title||"").toLowerCase().indexOf(kw)>=0);
   const list=document.getElementById("list");
   if(!d.jobs.length){list.innerHTML='<div class="empty">暂无匹配岗位。<br>点「扫岗位」触发哨兵扫描，或放宽分档 / 在「⚙ 画像」调整条件。</div>';loadStats();return;}
+  if(groupByCompany){
+    // 公司聚合：同公司合并为一组——组头显示岗位数与分数区间，
+    // 最高分岗位完整展开，其余折叠成一行摘要（点击行任意处展开完整卡片）
+    const groups={}; const order=[]; GROUP_INDEX={};
+    d.jobs.forEach(j=>{const c=(j.company||"未知公司"); GROUP_INDEX[j.raw_hash]=j; if(!groups[c]){groups[c]=[];order.push(c);} groups[c].push(j);});
+    list.innerHTML=order.map(c=>companyGroupHTML(c,groups[c])).join("");
+    loadStats();return;
+  }
   list.innerHTML=d.jobs.map(cardHTML).join("");
   loadStats();
+}
+function toggleGroup(){
+  groupByCompany=!groupByCompany;
+  document.getElementById("f-group").classList.toggle("on",groupByCompany);
+  saveFilters();
+  loadJobs();
+}
+/* 公司组：组头 + 最高分完整卡 + 其余折叠行（<details> 原生折叠，零 JS 状态） */
+function companyGroupHTML(company, jobs){
+  if(jobs.length===1) return cardHTML(jobs[0]);   // 单岗位公司不套组头，减少噪音
+  const best=jobs[0];
+  const rest=jobs.slice(1);
+  GROUP_INDEX[best.raw_hash]=best;
+  rest.forEach(j=>GROUP_INDEX[j.raw_hash]=j);
+  const scores=jobs.map(j=>j.match_score||0);
+  const hi=Math.max.apply(null,scores), lo=Math.min.apply(null,scores);
+  let html=`<div class="cgroup">`;
+  html+=`<div class="cgroup-head"><span class="cg-co">${esc(company)}</span>`
+      + `<span class="cg-meta">${jobs.length} 个岗位 · 匹配分 ${lo}~${hi}</span></div>`;
+  html+=cardHTML(best);
+  if(rest.length){
+    html+=`<details class="more-jobs"><summary>该公司还有 ${rest.length} 个岗位 · 点开逐个看（点摘要行可展开完整卡片）</summary>`;
+    html+=rest.map(miniRow).join("");
+    html+=`</details>`;
+  }
+  html+=`</div>`;
+  return html;
+}
+function miniRow(j){
+  GROUP_INDEX[j.raw_hash]=j;
+  const dl=j.deadline?` · 截止 ${esc(j.deadline)}`:"";
+  return `<div class="mini-row" data-hash="${esc(j.raw_hash)}">`
+    + `<span class="mini-score">${j.match_score||0}</span>`
+    + `<span class="mini-main" onclick="expandMini(this)" data-hash="${esc(j.raw_hash)}"><b>${esc(j.title||"职位待确认")}</b> · ${esc(j.city||"地点未知")}${dl}</span>`
+    + `<span class="mini-status">${esc(j.status||"新")}</span>`
+    + `<button class="mini-exp" onclick="expandMini(this)" data-hash="${esc(j.raw_hash)}">展开</button>`
+    + `</div>`;
+}
+function expandMini(el){
+  const j=GROUP_INDEX[el.getAttribute("data-hash")]; if(!j) return;
+  const row=el.closest(".mini-row"); if(row) row.outerHTML=cardHTML(j);
 }
 // 链接质量 → 按钮文案/样式。让用户一眼知道点下去会到哪
 const LINK_UI={
