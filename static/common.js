@@ -50,6 +50,7 @@ window.HermesUI = (function () {
   /* ── 统一导航：active 取 "chat" | "jobs" | "deliveries" | "dashboard" | "traces" | "demo" ── */
   const LINKS = [
     ["chat", "/", "💬 聊天"],
+    ["match", "/match", "🧲 匹配中心"],
     ["jobs", "/jobs", "🎯 岗位雷达"],
     ["deliveries", "/deliveries", "📮 投递进度"],
     ["dashboard", "/dashboard", "📊 后台"],

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>匹配中心 · Hermes Sentinel</title>
+<link rel="stylesheet" href="/static/common.css">
+<style>
+  body { margin: 0; background: var(--bg); color: var(--txt);
+         font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; }
+  header { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0; font-size: 17px; }
+  .sub { color: var(--sub); font-size: 12px; margin-top: 2px; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
+  /* 偏好表单 */
+  .pref-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+               padding: 16px; margin: 14px 0; }
+  .pref-card h2 { margin: 0 0 12px; font-size: 14.5px; color: var(--txt); }
+  .pref-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .pref-item label { display: block; font-size: 11.5px; color: var(--sub); margin-bottom: 5px; }
+  .pref-item select, .pref-item input { width: 100%; padding: 8px 9px; background: var(--card2);
+    border: 1px solid var(--line); border-radius: 8px; color: var(--txt); font-size: 13px; }
+  .pref-item input:focus, .pref-item select:focus { border-color: var(--acc); outline: none; }
+  .pref-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+  .pref-foot .hint { font-size: 11.5px; color: var(--sub); }
+  /* 公司推荐卡 */
+  .mcard { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+           padding: 16px; margin-bottom: 14px; position: relative; }
+  .mhead { display: flex; align-items: flex-start; gap: 16px; }
+  .mscore { flex: 0 0 auto; width: 76px; text-align: center; }
+  .mscore .n { font-size: 30px; font-weight: 800; line-height: 1.1; }
+  .mscore .lv { font-size: 11px; font-weight: 700; border-radius: 12px; padding: 2px 10px;
+                display: inline-block; margin-top: 4px; }
+  .lv-高 { background: #14532d; color: #4ade80; }
+  .lv-中 { background: #0c4a6e; color: #7dd3fc; }
+  .lv-低 { background: #7f1d1d; color: #fca5a5; }
+  .mmain { flex: 1; min-width: 0; }
+  .mmain .co { font-weight: 800; font-size: 16px; }
+  .mmain .meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; color: var(--sub); font-size: 12px; }
+  .mmain .meta span { background: var(--card2); padding: 3px 8px; border-radius: 6px; }
+  /* 四维拆解条 */
+  .dims { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+  .dim .dl { font-size: 11px; color: var(--sub); margin-bottom: 4px; display: flex; justify-content: space-between; }
+  .dim .track { height: 7px; background: var(--card2); border-radius: 4px; overflow: hidden; }
+  .dim .fill { height: 100%; border-radius: 4px; }
+  .dim .fill.f-job { background: #38bdf8; } .dim .fill.f-edu { background: #4ade80; }
+  .dim .fill.f-pref { background: #a78bfa; } .dim .fill.f-hist { background: #fbbf24; }
+  /* 理由与岗位 */
+  .reasons { margin-top: 10px; }
+  .reasons li { font-size: 12.5px; color: #cbd5e1; margin: 0 0 4px 16px; line-height: 1.5; }
+  .best { margin-top: 10px; background: var(--card2); border-radius: 10px; padding: 10px 12px;
+          font-size: 12.5px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .best .bs-title { flex: 1; min-width: 200px; }
+  .best .bs-title b { color: var(--txt); }
+  .best .bs-title small { display: block; color: var(--sub); margin-top: 2px; }
+  .apply { text-decoration: none; background: var(--good); color: #052e16; padding: 6px 12px;
+           border-radius: 8px; font-weight: 700; font-size: 12.5px; }
+  .apply.nolink { background: var(--card2); color: var(--sub); }
+  .more-jobs { margin-top: 10px; }
+  .more-jobs summary { cursor: pointer; color: var(--acc); font-size: 12px; font-weight: 600; user-select: none; }
+  .mini-row { display: flex; align-items: center; gap: 8px; padding: 6px 4px; font-size: 12.5px;
+              border-bottom: 1px solid rgba(51,65,85,.45); }
+  .mini-row:last-child { border-bottom: none; }
+  .mini-score { flex: 0 0 auto; width: 34px; text-align: center; font-weight: 800; color: var(--acc);
+                background: var(--card2); border-radius: 6px; padding: 2px 0; font-family: ui-monospace, monospace; }
+  .mini-main { flex: 1; min-width: 0; color: var(--txt); }
+  .mini-status { flex: 0 0 auto; color: var(--sub); font-size: 11px; }
+  .loading { text-align: center; color: var(--sub); padding: 40px; }
+  .empty { text-align: center; color: var(--sub); padding: 40px 16px; line-height: 1.8; }
+  .stale-note { font-size: 11px; color: var(--warn); margin-top: 4px; }
+  @media (max-width: 700px) { .mhead { flex-direction: column; } .dims { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+  <header>
+    <h1>🎯 匹配中心</h1>
+    <div class="sub">公司级四维匹配度：岗位匹配 × 学历友好 × 偏好符合 × 历史回应——先填偏好，再看推荐</div>
+  </header>
+  <div class="wrap">
+
+  <div class="pref-card">
+    <h2>⚙ 我的匹配偏好（重要指标）</h2>
+    <div class="pref-grid">
+      <div class="pref-item">
+        <label>⚡ 加班接受度（与公司口碑联动打分）</label>
+        <select id="p-overtime">
+          <option value="高">高——拼一把，加班无所谓</option>
+          <option value="中">中——可接受阶段性加班</option>
+          <option value="低">低——优先工作生活平衡</option>
+        </select>
+      </div>
+      <div class="pref-item">
+        <label>🎯 优先级（影响稳定性/成长信号权重）</label>
+        <select id="p-priority">
+          <option value="稳定">稳定优先——央国企/上市更友好</option>
+          <option value="成长">成长优先——接受波动换空间</option>
+          <option value="薪资">薪资优先——钱到位就行</option>
+        </select>
+      </div>
+      <div class="pref-item">
+        <label>💰 期望月薪下限（K，低于此的岗位降分）</label>
+        <input type="number" id="p-salary" placeholder="如 8（单位：K）" />
+      </div>
+      <div class="pref-item">
+        <label>🏭 行业偏好关键词（逗号分隔，命中加分）</label>
+        <input type="text" id="p-industry" placeholder="如 网络安全, 信创, 数据服务" />
+      </div>
+    </div>
+    <div class="pref-foot">
+      <button class="hs-btn" id="prefSave">保存偏好并重算匹配度</button>
+      <span class="hint">学历门槛 / 目标城市 / 方向等基础画像在 岗位雷达 → ⚙ 我的求职画像 里改</span>
+    </div>
+  </div>
+
+  <h2 style="font-size:15px;margin:18px 0 10px">🏢 推荐公司（按四维匹配度排序）</h2>
+  <div id="companies"><div class="loading">计算匹配度中…</div></div>
+
+  </div>
+
+<script src="/static/common.js"></script>
+<script>
+const { esc, toast, api, renderNav } = HermesUI;
+renderNav("match");
+let PROF = {};
+
+async function load() {
+  const box = document.getElementById("companies");
+  try {
+    const p = await api("/api/profile");
+    PROF = p;
+    fillPrefForm(p);
+    const d = await api("/api/match/companies");
+    renderCompanies(d.companies || []);
+    fillPrefForm(d.profile || PROF);
+  } catch (e) {
+    box.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function fillPrefForm(p) {
+  const set = (id, v) => { const e = document.getElementById(id); if (e && v != null) e.value = v; };
+  set("p-overtime", p.accept_overtime || "中");
+  set("p-priority", p.priority || "稳定");
+  set("p-salary", p.salary_min || 0);
+  set("p-industry", (p.industry_pref || []).join(", "));
+}
+
+async function savePref() {
+  const body = {
+    accept_overtime: document.getElementById("p-overtime").value,
+    priority: document.getElementById("p-priority").value,
+  };
+  const sm = parseInt(document.getElementById("p-salary").value || "0", 10);
+  if (sm > 0) body.salary_min = sm;
+  const inds = document.getElementById("p-industry").value.trim();
+  body.industry_pref = inds ? inds.split(/[,，]/).map(x => x.trim()).filter(Boolean) : [];
+  try {
+    const r = await api("/api/profile", { method: "POST", body: JSON.stringify(body) });
+    toast("偏好已保存，匹配度已按新偏好重算 ✓");
+    load();
+  } catch (e) {
+    toast("保存失败：" + e.message, true);
+  }
+}
+document.getElementById("prefSave").onclick = savePref;
+
+function renderCompanies(companies) {
+  const box = document.getElementById("companies");
+  if (!companies.length) {
+    box.innerHTML = '<div class="empty">岗位库为空——先去岗位雷达点「扫岗位」。</div>';
+    return;
+  }
+  box.innerHTML = companies.map(companyCard).join("");
+}
+
+function companyCard(m) {
+  const intelNote = m.has_intel
+    ? (m.intel_stale ? '<div class="stale-note">⚠ 公司情报已超 7 天，点岗位卡「🔍 情报」刷新</div>' : "")
+    : '<div class="stale-note">该公司尚未生成情报卡——在岗位卡点「🔍 情报」后，学历/口碑信号会进入匹配度</div>';
+  const dims = [
+    { k: "job",  label: "岗位匹配", v: m.dims.job,  max: 60 },
+    { k: "edu",  label: "学历友好", v: m.dims.edu,  max: 15 },
+    { k: "pref", label: "偏好符合", v: m.dims.pref, max: 15 },
+    { k: "hist", label: "历史回应", v: m.dims.hist, max: 10 },
+  ];
+  const dimBars = dims.map(x => {
+    const pct = Math.round((x.v / x.max) * 100);
+    return `<div class="dim"><div class="dl"><span>${esc(x.label)}</span><span>${x.v}</span></div>
+            <div class="track"><div class="fill f-${x.k}" style="width:${pct}%"></div></div></div>`;
+  }).join("");
+  const best = m.best_job || {};
+  const minis = (m.mini_jobs || []);
+  const apply = best.url
+    ? `<a class="apply" href="${esc(best.url)}" target="_blank" rel="noopener">去投递页 ↗</a>`
+    : '<span class="apply nolink">无链接</span>';
+  const hiddenMore = (m.more_count || 0);
+  const moreTxt = hiddenMore > 0 ? `（另有 ${hiddenMore} 个岗位去岗位雷达看）` : "";
+  const mini = minis.length
+    ? `<details class="more-jobs"><summary>该公司还有 ${minis.length} 个岗位 ${moreTxt}▾</summary>`
+      + minis.map(j => `<div class="mini-row"><span class="mini-score">${j.match_score || 0}</span>`
+        + `<span class="mini-main">${esc(j.title || "")} · ${esc(j.city || "")}</span>`
+        + `<span class="mini-status">${esc(j.status || "新")}</span></div>`).join("")
+      + `</details>` : "";
+  return `<div class="mcard">
+    <div class="mhead">
+      <div class="mscore"><div class="n" style="color:${m.level === "高" ? "#4ade80" : m.level === "中" ? "#7dd3fc" : "#fca5a5"}">${m.score}</div><div class="lv lv-${esc(m.level)}">${esc(m.level)}</div></div>
+      <div class="mmain">
+        <div class="co">${esc(m.company)}</div>
+        <div class="meta">
+          <span>💼 ${m.n_jobs} 个在库岗位</span>
+          <span>🏛 ${esc(m.best_enterprise_type || "性质未知")}</span>
+          ${m.best_industry ? `<span>🔧 ${esc(m.best_industry)}</span>` : ""}
+          ${m.has_intel ? "" : '<span style="color:var(--warn)">⚪ 情报未生成</span>'}
+          ${m.intel_stale ? '<span style="color:var(--warn)">情报已过期</span>' : ""}
+        </div>
+      </div>
+      ${apply}
+    </div>
+    <div class="dims">${dimBars}</div>
+    <ul class="reasons">${(m.reasons || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+    ${best ? `<div class="best"><div class="bs-title"><b>🏆 代表岗位：</b>${esc(best.title || "")}
+      <small>📍 ${esc(best.city || "地点未知")} · ⏰ ${esc(best.deadline || "截止未标注")} · 💰 ${esc(best.salary || "薪资面议")}</small></div>${apply}</div>` : ""}
+    ${mini}
+    ${intelNote}
+  </div>`;
+}
+
+load();
+</script>
+</body>
+</html>

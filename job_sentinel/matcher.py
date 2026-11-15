@@ -743,6 +743,95 @@ def success_signal(job, researched: dict, response_by_type: dict) -> dict:
     return {"add": round(add, 1), "level": level, "reasons": reasons}
 
 
+# ── 公司级匹配度：岗位 × 学历 × 偏好 × 历史四维合成（匹配中心核心） ──
+# 与岗位级 match_score 的分工：match_score 回答"这个岗位和我画像像不像"，
+# company_match 回答"这家公司整体值不值得投、投了大概率有没有回音"。
+
+def company_match(jobs: list[dict], profile: dict,
+                  intel: dict | None, response: dict | None) -> dict:
+    """按公司聚合打分。
+
+    jobs: 该公司全部在库岗位（dict，含 match_score/education/enterprise_type/industry/...）
+    intel: 该公司的 company_intel 情报（可为 None）
+    response: 该企业性质的历史回应统计（可为 None；样本 <3 不计权）
+    返回：{score 0-100, level, dims{四维}, reasons[], n_jobs, best}
+    """
+    n = len(jobs)
+    best = max(jobs, key=lambda j: j.get("match_score") or 0)
+    scores = [j.get("match_score") or 0 for j in jobs]
+    avg = sum(scores) / len(scores)
+
+    # ── 岗位维度 0-60：最高分为主（你能拿到的最好机会）+ 平均分反映岗位面 ──
+    job_dim = round((max(scores) / 100) * 50 + (avg / 100) * 10, 1)
+
+    # ── 学历维度 0-15：最好岗位的学历文本 + 情报实搜门槛 ──
+    edu_add, edu_note = education_friendliness(best.get("education"))
+    barrier = (intel or {}).get("school_barrier") or "未知"
+    barrier_add = {"宽松": 8.0, "严格": -8.0}.get(barrier, 0.0)
+    edu_dim = max(0.0, min(15.0, 7.5 + edu_add * 0.5 + barrier_add))
+    reasons_edu = [f"学历门槛{barrier}（{edu_note}）"] if barrier != "未知" else [edu_note]
+
+    # ── 偏好维度 0-15：性质/行业符合画像 + 加班接受度 × 口碑信号 ──
+    pref_add = 0.0
+    pref_reasons = []
+    nature = (best.get("enterprise_type") or "").strip()
+    p_nature = profile.get("nature") or []
+    if p_nature and nature in p_nature:
+        pref_add += 8.0
+        pref_reasons.append(f"{nature}∈你的偏好性质")
+    inds = profile.get("industry_pref") or []
+    ind = (best.get("industry") or "").strip()
+    if inds and ind and any(k in ind for k in inds):
+        pref_add += 4.0
+        pref_reasons.append(f"行业匹配（{ind}）")
+    ot = profile.get("accept_overtime", "中")
+    voice_hard = any("加班" in v or "强度" in v for v in (intel or {}).get("employee_voice", []))
+    if voice_hard and ot == "低":
+        pref_add -= 6.0
+        pref_reasons.append("口碑显示加班偏多，与你低加班接受度冲突")
+    elif voice_hard and ot == "高":
+        pref_add += 2.0
+    pref_dim = max(0.0, min(15.0, 7.5 + pref_add))
+
+    # ── 历史维度 0-10：你对该性质公司的实测回应率（样本 ≥3 才计权，否则中性） ──
+    resp = response or {}
+    if resp.get("applied", 0) >= 3:
+        hist_dim = round(resp["response_rate"] * 10, 1)
+        if resp["response_rate"] >= 0.34:
+            pref_reasons.append(f"你的实测：{nature or '该类公司'}回应率 {int(resp['response_rate']*100)}%")
+    else:
+        hist_dim = 5.0  # 无样本给中性分，不编造
+
+    total = round(min(100.0, job_dim + edu_dim + pref_dim + hist_dim), 1)
+    level = "高" if total >= 75 else ("中" if total >= 60 else "低")
+    reasons = pref_reasons + reasons_edu
+
+    rest = [j for j in jobs if j is not best]
+    rest.sort(key=lambda j: j.get("match_score") or 0, reverse=True)
+    mini_jobs = [{"title": j.get("title"), "city": j.get("city"),
+                  "status": j.get("status"), "match_score": j.get("match_score")}
+                 for j in rest[:20]]
+    return {
+        "score": total,
+        "level": level,
+        "dims": {"job": job_dim, "edu": round(edu_dim, 1), "pref": round(pref_dim, 1),
+                 "hist": hist_dim},
+        "reasons": reasons[:4],
+        "n_jobs": n,
+        "best_score": max(scores),
+        "company": best.get("company") or "",
+        "best_enterprise_type": nature,
+        "best_industry": ind,
+        "best_url": best.get("url") or "",
+        "best_title": best.get("title") or "",
+        "best_city": best.get("city") or "",
+        "best_deadline": best.get("deadline") or "",
+        "best_salary": best.get("salary") or "",
+        "mini_jobs": mini_jobs,
+        "more_count": max(0, n - 1 - len(mini_jobs)),
+    }
+
+
 def score_job(job: Job, profile: dict, today: str = "") -> tuple[int, str]:
     """加权打分 0-100 + 一句话理由。权重之和恰为 100，无需截断。
 

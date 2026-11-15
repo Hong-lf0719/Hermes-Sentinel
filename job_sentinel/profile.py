@@ -23,6 +23,10 @@ DEFAULT_PROFILE: dict = {
     "exclude_keywords": [],
     # 标题降权词：命中 -12（如"算法"——避开纯算法岗，但不硬删保留人工判断）
     "downgrade_keywords": [],
+    # ── 匹配中心偏好（company_match 打分用）──
+    "accept_overtime": "中",       # 加班接受度：高/中/低（与情报口碑联动打分）
+    "priority": "稳定",            # 优先级：稳定/成长/薪资（影响动态类信号解读）
+    "industry_pref": [],           # 行业偏好关键词（命中公司行业字段即加分）
     "updated_at": "",
 }
 
