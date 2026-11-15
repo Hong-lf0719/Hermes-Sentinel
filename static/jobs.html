@@ -158,6 +158,11 @@
   .ibarrier.b-mid{background:#78350f;color:#fcd34d}
   .ibarrier.b-strict{background:#7f1d1d;color:#fca5a5}
   .ibarrier.b-unknown{background:var(--card2);color:var(--sub)}
+  .itier{font-size:13px;font-weight:700;padding:6px 10px;border-radius:8px;display:inline-block}
+  .itier.t-good{background:#14532d;color:#4ade80}
+  .itier.t-bad{background:#7f1d1d;color:#fca5a5}
+  .wchip{font-size:12.5px;padding:4px 10px;border-radius:8px;background:rgba(244,114,182,.12);
+         color:#f9a8d4;border:1px solid rgba(244,114,182,.25);display:inline-block}
   .iconf{font-size:11px;color:var(--sub);margin-top:2px}
   .inote{font-size:11px;color:var(--sub);background:var(--card2);border-radius:8px;padding:8px 10px;margin-top:12px;line-height:1.5}
   .ibtn-intel{background:var(--card2);color:var(--sub);border:1px solid var(--line);font-weight:500}
@@ -586,13 +591,25 @@ function closeIntel(){ document.getElementById("intelModal").classList.remove("o
 function intelHTML(v, searchedAt, cached){
   const b = v.school_barrier || "未知";
   const bcls = {"宽松":"b-loose","一般":"b-mid","严格":"b-strict"}[b] || "b-unknown";
+  const tf = v.school_tier_friendly || "未知";
+  const tfcls = {"双非友好":"t-good","看重院校":"t-bad"}[tf] || "";
+  const df = v.difficulty || "未知";
+  const dfcls = {"友好":"b-loose","中等":"b-mid","较难":"b-strict","困难":"b-strict"}[df] || "b-unknown";
+  const wchips = (v.welfare || []).map(w => `<span class="wchip">${esc(w)}</span>`).join("");
   const sec = (title, items) => (items && items.length)
     ? `<div class="isec"><div class="it">${title}</div><ul>${items.map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>` : "";
   return `<h3>${esc(v.company || "")} 情报卡</h3>
     <div class="isub">${cached ? "缓存（7 天内可刷新）" : "刚生成"} · 检索时间 ${esc(String(searchedAt).slice(0,16))}</div>
-    <div class="isec"><div class="it">🎓 校招学历门槛信号</div>
-      <span class="ibarrier ${bcls}">${esc(b)}</span>
-      <div style="font-size:12.5px;color:#cbd5e1;margin-top:6px">${esc(v.school_note || "未检索到明确信息")}</div></div>
+    <div class="isec"><div class="it">🎓 校招门槛信号（学历 / 院校态度 / 笔面试难度）</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:4px 0">
+        <span class="ibarrier ${bcls}" title="门槛结论">学历门槛 ${esc(b)}</span>
+        ${tfcls ? `<span class="itier ${tfcls}" title="对双非/民办二本的态度（面经/录取院校证据）">对双非：${esc(tf)}</span>` : `<span class="ibarrier b-unknown">对双非：未知</span>`}
+        <span class="ibarrier ${dfcls}" title="笔面试要求难度">笔面试 ${esc(df)}</span>
+      </div>
+      <div style="font-size:12.5px;color:#cbd5e1;margin-top:6px">${esc(v.school_note || "未检索到明确信息")}</div>
+      ${v.school_tier_note ? `<div style="font-size:12.5px;color:#cbd5e1;margin-top:4px"><b style="color:#4ade80">院校态度依据：</b>${esc(v.school_tier_note)}</div>` : ""}
+      ${v.difficulty_note ? `<div style="font-size:12.5px;color:#cbd5e1;margin-top:4px"><b style="color:#fcd34d">难度依据：</b>${esc(v.difficulty_note)}</div>` : ""}</div>
+    ${wchips ? `<div class="isec"><div class="it">🎁 福利（五险一金 / 包住 / 补贴…）</div><div style="display:flex;gap:6px;flex-wrap:wrap">${wchips}</div></div>` : ""}
     ${sec("🗣 员工口碑（加班 / 氛围 / 待遇）", v.employee_voice)}
     ${sec("📈 近期动态（扩张 / 裁员 / 经营）", v.recent_moves)}
     ${sec("🧪 面经要点", v.interview_tips)}

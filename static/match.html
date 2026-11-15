@@ -38,13 +38,22 @@
   .mmain .co { font-weight: 800; font-size: 16px; }
   .mmain .meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; color: var(--sub); font-size: 12px; }
   .mmain .meta span { background: var(--card2); padding: 3px 8px; border-radius: 6px; }
-  /* 四维拆解条 */
-  .dims { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+  /* 五维拆解条 */
+  .dims { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 12px; }
   .dim .dl { font-size: 11px; color: var(--sub); margin-bottom: 4px; display: flex; justify-content: space-between; }
   .dim .track { height: 7px; background: var(--card2); border-radius: 4px; overflow: hidden; }
   .dim .fill { height: 100%; border-radius: 4px; }
   .dim .fill.f-job { background: #38bdf8; } .dim .fill.f-edu { background: #4ade80; }
-  .dim .fill.f-pref { background: #a78bfa; } .dim .fill.f-hist { background: #fbbf24; }
+  .dim .fill.f-welfare { background: #f472b6; } .dim .fill.f-pref { background: #a78bfa; }
+  .dim .fill.f-hist { background: #fbbf24; }
+  /* 福利 chips */
+  .wchips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .wchip { font-size: 11.5px; padding: 3px 9px; border-radius: 8px; background: rgba(244,114,182,.12);
+           color: #f9a8d4; border: 1px solid rgba(244,114,182,.25); }
+  .wchip.hit { background: rgba(244,114,182,.28); color: #fbcfe8; font-weight: 700; }
+  .itier { font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 8px; display: inline-block; }
+  .itier.t-good { background: #14532d; color: #4ade80; }
+  .itier.t-bad { background: #7f1d1d; color: #fca5a5; }
   /* 理由与岗位 */
   .reasons { margin-top: 10px; }
   .reasons li { font-size: 12.5px; color: #cbd5e1; margin: 0 0 4px 16px; line-height: 1.5; }
@@ -81,7 +90,7 @@
 <body>
   <header>
     <h1>🎯 匹配中心</h1>
-    <div class="sub">公司级四维匹配度：岗位匹配 × 学历友好 × 偏好符合 × 历史回应——先填偏好，再看推荐</div>
+    <div class="sub">公司级五维匹配度：岗位 40 + 学历友好 25 + 福利 15 + 偏好 10 + 历史回应 10——先填偏好，再看推荐</div>
   </header>
   <div class="wrap">
 
@@ -112,6 +121,21 @@
         <label>🏭 行业偏好关键词（逗号分隔，命中加分）</label>
         <input type="text" id="p-industry" placeholder="如 网络安全, 信创, 数据服务" />
       </div>
+      <div class="pref-item">
+        <label>🎓 我的学校层次（学历友好维度按此解读）</label>
+        <select id="p-schooltier">
+          <option value="985">985</option>
+          <option value="211">211</option>
+          <option value="一本">一本</option>
+          <option value="二本">二本（公办）</option>
+          <option value="民办二本/独立学院">民办二本/独立学院</option>
+          <option value="专科">专科</option>
+        </select>
+      </div>
+      <div class="pref-item">
+        <label>🎁 看重的福利（逗号分隔，公司情报命中即加分）</label>
+        <input type="text" id="p-welfare" placeholder="如 包住宿, 餐补, 五险一金, 班车" />
+      </div>
     </div>
     <div class="pref-foot">
       <button class="hs-btn" id="prefSave">保存偏好并重算匹配度</button>
@@ -123,7 +147,7 @@
     </div>
   </div>
 
-  <h2 style="font-size:15px;margin:18px 0 10px">🏢 推荐公司（按四维匹配度排序）</h2>
+  <h2 style="font-size:15px;margin:18px 0 10px">🏢 推荐公司（按五维匹配度排序）</h2>
   <div id="companies"><div class="loading">计算匹配度中…</div></div>
 
   </div>
@@ -154,17 +178,22 @@ function fillPrefForm(p) {
   set("p-priority", p.priority || "稳定");
   set("p-salary", p.salary_min || 0);
   set("p-industry", (p.industry_pref || []).join(", "));
+  set("p-schooltier", p.school_tier || "民办二本/独立学院");
+  set("p-welfare", (p.welfare_pref || []).join(", "));
 }
 
 async function savePref() {
   const body = {
     accept_overtime: document.getElementById("p-overtime").value,
     priority: document.getElementById("p-priority").value,
+    school_tier: document.getElementById("p-schooltier").value,
   };
   const sm = parseInt(document.getElementById("p-salary").value || "0", 10);
   if (sm > 0) body.salary_min = sm;
   const inds = document.getElementById("p-industry").value.trim();
   body.industry_pref = inds ? inds.split(/[,，]/).map(x => x.trim()).filter(Boolean) : [];
+  const wfs = document.getElementById("p-welfare").value.trim();
+  body.welfare_pref = wfs ? wfs.split(/[,，]/).map(x => x.trim()).filter(Boolean) : [];
   try {
     const r = await api("/api/profile", { method: "POST", body: JSON.stringify(body) });
     toast("偏好已保存，匹配度已按新偏好重算 ✓");
@@ -193,11 +222,23 @@ function companyCard(m) {
   const bcls = { "宽松": "b-loose", "一般": "b-mid", "严格": "b-strict" }[bar] || "";
   const badge = (bar && bcls)
     ? `<span class="ibarrier ${bcls}" title="${esc(m.school_note || "")}">🎓 门槛${esc(bar)}</span>` : "";
+  // 双非/院校态度徽章：同 confidence 规则（后端低置信时该字段为"未知"，自然不显示）
+  const tf = m.school_tier_friendly || "";
+  const tcls = { "双非友好": "t-good", "看重院校": "t-bad" }[tf] || "";
+  const tierBadge = (tf && tcls)
+    ? `<span class="itier ${tcls}" title="基于面经/录取院校等公开信息的调研结论">🏫 ${esc(tf)}</span>` : "";
+  // 福利 chips：命中你的 welfare_pref 的高亮
+  const wPref = (PROF && PROF.welfare_pref) || [];
+  const chips = (m.welfare || []).map(w => {
+    const hit = wPref.some(k => w.includes(k));
+    return `<span class="wchip ${hit ? "hit" : ""}">${esc(w)}</span>`;
+  }).join("");
   const dims = [
-    { k: "job",  label: "岗位匹配", v: m.dims.job,  max: 60 },
-    { k: "edu",  label: "学历友好", v: m.dims.edu,  max: 15 },
-    { k: "pref", label: "偏好符合", v: m.dims.pref, max: 15 },
-    { k: "hist", label: "历史回应", v: m.dims.hist, max: 10 },
+    { k: "job",     label: "岗位",     v: m.dims.job,     max: 40 },
+    { k: "edu",     label: "学历友好", v: m.dims.edu,     max: 25 },
+    { k: "welfare", label: "福利",     v: m.dims.welfare, max: 15 },
+    { k: "pref",    label: "偏好",     v: m.dims.pref,    max: 10 },
+    { k: "hist",    label: "历史回应", v: m.dims.hist,    max: 10 },
   ];
   const dimBars = dims.map(x => {
     const pct = Math.round((x.v / x.max) * 100);
@@ -225,7 +266,7 @@ function companyCard(m) {
         <div class="meta">
           <span>💼 ${m.n_jobs} 个在库岗位</span>
           <span>🏛 ${esc(m.best_enterprise_type || "性质未知")}</span>
-          ${badge}
+          ${badge}${tierBadge}
           ${m.best_industry ? `<span>🔧 ${esc(m.best_industry)}</span>` : ""}
           ${m.has_intel ? "" : '<span style="color:var(--warn)">⚪ 情报未生成</span>'}
           ${m.intel_stale ? '<span style="color:var(--warn)">情报已过期</span>' : ""}
@@ -234,6 +275,7 @@ function companyCard(m) {
       ${apply}
     </div>
     <div class="dims">${dimBars}</div>
+    ${chips ? `<div class="wchips">${chips}</div>` : ""}
     <ul class="reasons">${(m.reasons || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
     ${best ? `<div class="best"><div class="bs-title"><b>🏆 代表岗位：</b>${esc(best.title || "")}
       <small>📍 ${esc(best.city || "地点未知")} · ⏰ ${esc(best.deadline || "截止未标注")} · 💰 ${esc(best.salary || "薪资面议")}</small></div>${apply}</div>` : ""}

@@ -24,6 +24,8 @@ DEFAULT_PROFILE: dict = {
     # 标题降权词：命中 -12（如"算法"——避开纯算法岗，但不硬删保留人工判断）
     "downgrade_keywords": [],
     # ── 匹配中心偏好（company_match 打分用）──
+    "school_tier": "民办二本/独立学院",  # 学校层次：985/211/一本/二本/民办二本/独立学院/专科
+    "welfare_pref": ["包住宿", "餐补"],   # 福利偏好关键词（命中公司福利即加分）
     "accept_overtime": "中",       # 加班接受度：高/中/低（与情报口碑联动打分）
     "priority": "稳定",            # 优先级：稳定/成长/薪资（影响动态类信号解读）
     "industry_pref": [],           # 行业偏好关键词（命中公司行业字段即加分）
@@ -48,10 +50,12 @@ def _migrate(p: dict) -> dict:
                 seen.add(nd); migrated.append(nd)
         p["directions"] = migrated
     # 旧院校等级字段 → 学历门槛（单选默认值）
-    if "edu_threshold" not in p and p.get("school_tier"):
+    # 注意：school_tier 已被匹配中心重新启用（985/211/一本/二本/民办二本…），
+    # 这里只迁移真正的废弃字段 school_level，绝不能再 pop school_tier
+    if "edu_threshold" not in p and p.get("school_level"):
         p["edu_threshold"] = "本科可投"
     # 丢弃已废弃字段
-    for k in ("prefer_companies", "prefer_natures", "school_level", "school_tier"):
+    for k in ("prefer_companies", "prefer_natures", "school_level"):
         p.pop(k, None)
     return p
 

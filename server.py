@@ -1198,10 +1198,12 @@ async def profile_update(key: str, value: str) -> str:
 # 对学历的态度、口碑与近期稳定性，把有限的精力投给回复率更高的公司。
 _COMPANY_INTEL_TTL_DAYS = 7
 _INTEL_QUERIES = [
-    "{c} 校园招聘 学历要求 本科 双非 一本",
+    "{c} 校园招聘 学历要求 985 211 双非",
     "{c} 员工评价 加班 工作强度",
     "{c} 裁员 扩张 经营状况",
     "{c} 面经 面试经验 校招",
+    "{c} 福利待遇 包住 补贴 六险一金",
+    "{c} 校招 双非 二本 普通本科 能投吗",
 ]
 
 
@@ -1238,6 +1240,18 @@ def _intel_stale(cached: dict) -> bool:
         return True
 
 
+def _intel_fresh(cached: dict | None) -> bool:
+    """情报"新鲜且新 schema"才算可用。
+
+    旧 schema 卡（2026-11-15 之前，只有学历门槛/口碑，没有
+    school_tier_friendly/welfare/difficulty）即使 7 天内也自动重研升级，
+    保证匹配中心五维打分与情报弹窗拿得到新字段。
+    """
+    if not cached or _intel_stale(cached):
+        return False
+    return "school_tier_friendly" in (cached.get("intel") or {})
+
+
 async def _ai_json(prompt: str, max_tokens: int = 2600) -> dict | None:
     """LLM 结构化 JSON 输出（json_object 模式 + 3 次重试）。失败返回 None。"""
     last_err = None
@@ -1270,9 +1284,16 @@ async def _ai_json(prompt: str, max_tokens: int = 2600) -> dict | None:
 
 def _intel_reply_text(company: str, intel: dict) -> str:
     bar = intel.get("school_barrier") or "未知"
-    lines = [f"🏢 {company} · 学历门槛信号：{bar}（置信度 {intel.get('confidence', '低')}）"]
+    tf = intel.get("school_tier_friendly") or "未知"
+    df = intel.get("difficulty") or "未知"
+    lines = [f"🏢 {company} · 学历门槛：{bar} · 对双非：{tf} · 笔面试：{df}（置信度 {intel.get('confidence', '低')}）"]
     if intel.get("school_note"):
         lines.append(f"· {intel['school_note']}")
+    if intel.get("school_tier_note"):
+        lines.append(f"· 院校态度依据：{intel['school_tier_note']}")
+    wf = [w for w in (intel.get("welfare") or []) if w]
+    if wf:
+        lines.append("🎁 福利：" + "、".join(wf[:6]))
     for k, icon in (("employee_voice", "🗣 员工口碑"), ("recent_moves", "📈 近期动态"), ("interview_tips", "🧪 面经要点")):
         vals = intel.get(k) or []
         if vals:
@@ -1289,7 +1310,7 @@ async def company_research(company: str = "", focus: str = "") -> str:
     if not company:
         return "⚠️ 请告诉我要调研的公司名"
     cached = _load_company_intel(company)
-    if cached and not _intel_stale(cached):
+    if _intel_fresh(cached):
         return _intel_reply_text(company, cached["intel"])
 
     queries = [q.format(c=company) for q in _INTEL_QUERIES]
@@ -1304,16 +1325,37 @@ async def company_research(company: str = "", focus: str = "") -> str:
         texts.append(f"【检索{i + 1}】{body}")
     material = "\n".join(texts)[:6000]
 
-    prompt = f"""你是求职情报分析师。用户背景：民办二本（独立学院）2027 届本科，找 AI 应用开发/数据方向，关心学历门槛。
+    # 用户背景动态注入（哨兵画像 + user_profile KV，不再硬编码）
+    from job_sentinel.profile import load_profile as load_sentinel_profile
+    prof_path = Path(__file__).parent / "job_sentinel" / "profile.json"
+    prof = load_sentinel_profile(prof_path)
+    kv = load_profile()
+    user_bg = [
+        f"院校层次：{prof.get('school_tier', '民办二本/独立学院')}（{kv.get('学校', '')}）",
+        f"学历：{prof.get('education', '本科')}（{kv.get('毕业年份', '2027')} 届）",
+        f"专业：{kv.get('专业', '')}",
+        f"技能栈：{kv.get('技能栈', '')}",
+        f"求职方向：{(prof.get('directions') or [])}",
+        f"目标城市：{(prof.get('regions') or [])}",
+        f"加班接受度：{prof.get('accept_overtime', '中')}（用户最反感口碑里的高强度加班时，请在建议中体现）",
+    ]
+
+    prompt = f"""你是求职情报分析师。用户背景：
+{chr(10).join(user_bg)}
 调研公司：{company}{('，重点关注：' + focus) if focus else ''}
 
-以下是四路公开搜索摘要（可能含广告或无关内容，请甄别；没有证据的维度如实写"未检索到"）：
+以下是六路公开搜索摘要（可能含广告或无关内容，请甄别；没有证据的维度如实写"未检索到"）：
 {material}
 
 输出 JSON（不要解释）：
 {{
   "school_barrier": "宽松|一般|严格|未知",
   "school_note": "学历门槛判断依据一句话（引用搜索证据；无证据则写'未检索到明确学历门槛信息'）",
+  "school_tier_friendly": "双非友好|看重院校|未知",
+  "school_tier_note": "该校招对双非/民办/普通本科的实际态度一句话（引用面经或录取院校证据）",
+  "welfare": ["福利清单（包住宿/餐补/六险一金/班车/房补等，仅收录搜索材料里明确提到的）"],
+  "difficulty": "偏高|适中|友好|未知",
+  "difficulty_note": "岗位要求难度判断一句话（对照用户技能栈：Python/LangGraph/FastAPI/数据分析）",
   "employee_voice": ["员工口碑要点（加班强度/氛围/待遇，标注来源网站提示）"],
   "recent_moves": ["近期动态（扩张/裁员/经营状况）"],
   "interview_tips": ["面经要点"],
@@ -3601,7 +3643,7 @@ async def api_company_intel(company: str, refresh: bool = False, focus: str = ""
     if not company:
         raise HTTPException(status_code=400, detail="缺少 company 参数")
     cached = _load_company_intel(company)
-    if cached and not refresh and not _intel_stale(cached):
+    if cached and not refresh and _intel_fresh(cached):
         return {"company": company, "intel": cached["intel"],
                 "searched_at": cached["searched_at"], "cached": True}
     await company_research(company, focus)
@@ -3691,7 +3733,7 @@ async def _intel_backfill_task(limit: int = 20, min_score: int = 60):
         for r in rows:
             co = (r["company"] or "").strip()
             cached = _load_company_intel(co)
-            if cached and not _intel_stale(cached):
+            if _intel_fresh(cached):  # 旧 schema 卡不算新鲜，会自动重研升级
                 continue
             targets.append((co, r["ms"]))
             if len(targets) >= limit:
@@ -3822,11 +3864,12 @@ async def match_page():
 
 @app.get("/api/match/companies")
 async def api_match_companies():
-    """匹配中心核心接口：按公司聚合岗位 → 四维匹配度打分 → 推荐排序。
+    """匹配中心核心接口：按公司聚合岗位 → 五维匹配度打分 → 推荐排序。
 
-    四维：岗位匹配（该公司最高/平均 match_score）· 学历友好（岗位学历文本 +
-    公司情报实搜门槛）· 偏好符合（性质/行业/加班接受度×口碑）· 历史回应
-    （你对该性质公司的实测回应率，样本≥3 才计权）。
+    五维：岗位匹配 40（该公司最高/平均 match_score）· 学历友好 25（岗位学历文本 +
+    公司情报实搜门槛 + 对双非/民办的实际态度）· 福利 15（公司福利 ∩ 福利偏好）·
+    偏好 10（性质/行业/加班接受度×口碑）· 历史回应 10（你对该性质公司的实测
+    回应率，样本≥3 才计权）。
     """
     from job_sentinel.models import Job
     from job_sentinel.profile import load_profile

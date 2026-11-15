@@ -753,35 +753,63 @@ def success_signal(job, researched: dict, response_by_type: dict) -> dict:
 
 def company_match(jobs: list[dict], profile: dict,
                   intel: dict | None, response: dict | None) -> dict:
-    """按公司聚合打分。
+    """按公司聚合打分（五维：岗位 40 / 学历友好 25 / 福利 15 / 偏好 10 / 历史回应 10）。
 
     jobs: 该公司全部在库岗位（dict，含 match_score/education/enterprise_type/industry/...）
-    intel: 该公司的 company_intel 情报（可为 None）
+    profile: 哨兵画像（school_tier/welfare_pref/accept_overtime/industry_pref/nature）
+    intel: 该公司的 company_intel 情报（可为 None；低置信信号按中性计，不编造）
     response: 该企业性质的历史回应统计（可为 None；样本 <3 不计权）
-    返回：{score 0-100, level, dims{四维}, reasons[], n_jobs, best}
+    返回：{score 0-100, level, dims{五维}, reasons[], n_jobs, best_*, welfare, 门槛/态度}
     """
     n = len(jobs)
     best = max(jobs, key=lambda j: j.get("match_score") or 0)
     scores = [j.get("match_score") or 0 for j in jobs]
     avg = sum(scores) / len(scores)
 
-    # ── 岗位维度 0-60：最高分为主（你能拿到的最好机会）+ 平均分反映岗位面 ──
-    job_dim = round((max(scores) / 100) * 50 + (avg / 100) * 10, 1)
+    # ── 岗位维度 0-40：最高分为主（你能拿到的最好机会）+ 平均分反映岗位面 ──
+    job_dim = round((max(scores) / 100) * 30 + (avg / 100) * 10, 1)
 
-    # ── 学历维度 0-15：最好岗位的学历文本 + 情报实搜门槛 ──
+    # ── 学历友好维度 0-25：双非/民办求职者的核心关切 ──
+    # 信号 1：岗位学历文本（本科可投 +8 / 仅硕士 -12 / 未标注 0）
     edu_add, edu_note = education_friendliness(best.get("education"))
-    barrier = (intel or {}).get("school_barrier") or "未知"
-    barrier_add = {"宽松": 8.0, "严格": -8.0}.get(barrier, 0.0)
-    edu_dim = max(0.0, min(15.0, 7.5 + edu_add * 0.5 + barrier_add))
-    reasons_edu = [f"学历门槛{barrier}（{edu_note}）"] if barrier != "未知" else [edu_note]
+    # 信号 2：公司情报实搜的门槛结论（宽松 +12 / 一般 +6 / 严格 -12；低置信按 0）
+    intel_e = intel or {}
+    barrier = intel_e.get("school_barrier") or "未知"
+    conf = intel_e.get("confidence") or "低"
+    barrier_add = 0.0
+    if conf != "低" and barrier in ("宽松", "一般", "严格"):
+        barrier_add = {"宽松": 12.0, "一般": 6.0, "严格": -12.0}[barrier]
+    # 信号 3：该校招对双非/民办的实际态度（面经/录取院校证据）
+    tier = intel_e.get("school_tier_friendly") or "未知"
+    tier_add = 0.0
+    if conf != "低" and tier in ("双非友好", "看重院校"):
+        tier_add = {"双非友好": 13.0, "看重院校": -13.0}[tier]
+    edu_dim = max(0.0, min(25.0, 12.5 + edu_add * 0.4 + barrier_add * 0.4 + tier_add * 0.4))
+    reasons_edu = []
+    if barrier != "未知":
+        reasons_edu.append(f"学历门槛{barrier}（{edu_note}）")
+    if tier != "未知":
+        reasons_edu.append(f"对双非/{profile.get('school_tier', '普通本科')}：{tier}")
+    if not reasons_edu:
+        reasons_edu = [edu_note]
 
-    # ── 偏好维度 0-15：性质/行业符合画像 + 加班接受度 × 口碑信号 ──
+    # ── 福利维度 0-15：公司福利 ∩ 你的福利偏好 ──
+    welfare = [w for w in (intel_e.get("welfare") or []) if w]
+    w_pref = profile.get("welfare_pref") or []
+    hit_w = [w for w in welfare if any(k in w for k in w_pref)] if w_pref else []
+    if welfare:
+        # 命中偏好每项 5 分封顶；有数据但没配偏好 → 按福利丰富度给底分 3
+        welfare_dim = round(min(15.0, len(hit_w) * 5.0 + (3.0 if not w_pref else 0.0)), 1)
+    else:
+        welfare_dim = 7.5  # 无情报数据 → 中性分，不编造
+
+    # ── 偏好维度 0-10：性质/行业符合 + 加班接受度 × 口碑 ──
     pref_add = 0.0
     pref_reasons = []
     nature = (best.get("enterprise_type") or "").strip()
     p_nature = profile.get("nature") or []
     if p_nature and nature in p_nature:
-        pref_add += 8.0
+        pref_add += 6.0
         pref_reasons.append(f"{nature}∈你的偏好性质")
     inds = profile.get("industry_pref") or []
     ind = (best.get("industry") or "").strip()
@@ -795,7 +823,7 @@ def company_match(jobs: list[dict], profile: dict,
         pref_reasons.append("口碑显示加班偏多，与你低加班接受度冲突")
     elif voice_hard and ot == "高":
         pref_add += 2.0
-    pref_dim = max(0.0, min(15.0, 7.5 + pref_add))
+    pref_dim = max(0.0, min(10.0, 5.0 + pref_add))
 
     # ── 历史维度 0-10：你对该性质公司的实测回应率（样本 ≥3 才计权，否则中性） ──
     resp = response or {}
@@ -806,21 +834,22 @@ def company_match(jobs: list[dict], profile: dict,
     else:
         hist_dim = 5.0  # 无样本给中性分，不编造
 
-    total = round(min(100.0, job_dim + edu_dim + pref_dim + hist_dim), 1)
-    level = "高" if total >= 75 else ("中" if total >= 60 else "低")
+    total = round(min(100.0, job_dim + edu_dim + welfare_dim + pref_dim + hist_dim), 1)
+    level = "高" if total >= 75 else ("中" if total >= 55 else "低")
     reasons = pref_reasons + reasons_edu
+    if welfare:
+        reasons.append("福利：" + "、".join(welfare[:6]))
 
-    rest = [j for j in jobs if j is not best]
-    rest.sort(key=lambda j: j.get("match_score") or 0, reverse=True)
+    ordered = sorted(jobs, key=lambda x: x.get("match_score") or 0, reverse=True)
     mini_jobs = [{"title": j.get("title"), "city": j.get("city"),
                   "status": j.get("status"), "match_score": j.get("match_score")}
-                 for j in rest[:20]]
+                 for j in ordered[1:21]]
     return {
         "score": total,
         "level": level,
-        "dims": {"job": job_dim, "edu": round(edu_dim, 1), "pref": round(pref_dim, 1),
-                 "hist": hist_dim},
-        "reasons": reasons[:4],
+        "dims": {"job": job_dim, "edu": round(edu_dim, 1), "welfare": welfare_dim,
+                 "pref": round(pref_dim, 1), "hist": hist_dim},
+        "reasons": reasons[:5],
         "n_jobs": n,
         "best_score": max(scores),
         "company": best.get("company") or "",
@@ -831,6 +860,9 @@ def company_match(jobs: list[dict], profile: dict,
         "best_city": best.get("city") or "",
         "best_deadline": best.get("deadline") or "",
         "best_salary": best.get("salary") or "",
+        "welfare": welfare,
+        "school_barrier": barrier,
+        "school_tier_friendly": tier,
         "mini_jobs": mini_jobs,
         "more_count": max(0, n - 1 - len(mini_jobs)),
     }
