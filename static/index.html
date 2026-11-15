@@ -849,6 +849,14 @@ async function sendMessage() {
     const statusEl = document.createElement('div');
     statusEl.className = 'stream-status';
     statusEl.innerHTML = '<span class="stream-dot"></span><span>正在思考…</span>';
+    // 等待计时器：让慢回复可感知（工具调用/深度推理本来就需要时间）
+    statusEl.dataset.t0 = String(Date.now());
+    statusEl._statusText = '正在思考…';
+    statusEl._timer = setInterval(() => {
+      const s = Math.round((Date.now() - Number(statusEl.dataset.t0)) / 1000);
+      const label = statusEl.querySelector('span:last-child');
+      if (label) label.textContent = (statusEl._statusText || '正在思考…') + `（已用时 ${s}s）`;
+    }, 1000);
     bubble.appendChild(statusEl);
 
     contentDiv.appendChild(bubble);
@@ -899,10 +907,12 @@ async function sendMessage() {
             catch { continue; }
 
             if (ev.type === 'status') {
+              statusEl._statusText = ev.text;
               statusEl.querySelector('span:last-child').textContent = ev.text;
             } else if (ev.type === 'token') {
               if (firstToken) {
                 firstToken = false;
+                if (statusEl._timer) clearInterval(statusEl._timer);
                 statusEl.remove();
               }
               fullText += ev.content;
@@ -911,6 +921,7 @@ async function sendMessage() {
             } else if (ev.type === 'done') {
               // 关键：重置 firstToken 并移除 statusEl，避免流结束兜底把已渲染的 HTML 覆盖成"响应为空"
               firstToken = false;
+              if (statusEl._timer) clearInterval(statusEl._timer);
               if (statusEl.parentNode) statusEl.remove();
               if (ev.html) {
                 // HTML 精排版（日报/求职报告邮件模板）
@@ -923,6 +934,7 @@ async function sendMessage() {
               }
             } else if (ev.type === 'error') {
               firstToken = false;
+              if (statusEl._timer) clearInterval(statusEl._timer);
               if (statusEl.parentNode) statusEl.remove();
               bubble.innerHTML = `<div class="error-bubble">⚠️ ${ev.text}</div>`;
             }
@@ -930,6 +942,7 @@ async function sendMessage() {
         }
 
         if (firstToken && statusEl.parentNode) {
+          if (statusEl._timer) clearInterval(statusEl._timer);
           bubble.innerHTML = '<div class="error-bubble">⚠️ 响应为空</div>';
         }
       } catch (streamErr) {
@@ -949,6 +962,7 @@ async function sendMessage() {
           try {
             const ev = JSON.parse(line.slice(5).trim());
             if (ev.type === 'status') {
+              statusEl._statusText = ev.text;
               statusEl.querySelector('span:last-child').textContent = ev.text;
             } else if (ev.type === 'token') {
               fullText += ev.content;

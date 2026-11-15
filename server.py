@@ -3023,9 +3023,13 @@ async def demo_summary():
             source_rows = db.execute(
                 "SELECT source, COUNT(*) AS n FROM jobs GROUP BY source ORDER BY n DESC LIMIT 8"
             ).fetchall()
+            # 演示页 top 榜按公司去重：一家公司只占一席（展示整体多样性，
+            # 避免"都是一家"的观感），公司内取其最高分岗位（SQLite 裸列
+            # 与 MAX() 同用时会取自 max 行，符合预期）
             top_rows = db.execute(
-                "SELECT company,title,city,match_score,status,url,source FROM jobs "
-                "WHERE user_hidden=0 ORDER BY match_score DESC LIMIT 5"
+                "SELECT company, title, city, MAX(match_score) AS ms, status, url, source FROM jobs "
+                "WHERE user_hidden=0 "
+                "GROUP BY company ORDER BY ms DESC LIMIT 8"
             ).fetchall()
             high_match = db.execute(
                 "SELECT COUNT(*) FROM jobs WHERE user_hidden=0 AND match_score>=75"
@@ -3058,7 +3062,7 @@ async def demo_summary():
                 "company": r["company"],
                 "title": r["title"],
                 "city": r["city"],
-                "score": r["match_score"],
+                "score": r["ms"],
                 "status": r["status"],
                 "url": r["url"],
                 "source": r["source"],

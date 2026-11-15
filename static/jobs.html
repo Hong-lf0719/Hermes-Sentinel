@@ -200,6 +200,7 @@
 </header>
 
 <div class="bar">
+  <input type="text" id="f-kw" placeholder="🔍 搜公司 / 职位…" oninput="loadJobs()" style="flex:1 1 150px;min-width:130px">
   <select id="f-tier" onchange="loadJobs()">
     <option value="" selected>全部分档</option>
     <option value="值得投+">✅ 值得投+ (≥60)</option>
@@ -214,29 +215,28 @@
     <option value="deadline">按截止日（最急优先）</option>
     <option value="new">按最新发现</option>
   </select>
-  <select id="f-source" onchange="loadJobs()"><option value="">全部来源</option></select>
-  <input type="text" id="f-kw" placeholder="🔍 搜公司 / 职位…" oninput="loadJobs()" style="min-width:130px">
   <button class="btn-set" id="f-group" onclick="toggleGroup()" title="同一公司的多个岗位合并为一组，只展开最高分岗位">🏢 公司聚合</button>
   <button class="btn-set" id="f-friendly" onclick="toggleFriendly()" title="隐藏成功率信号为「低」的岗位（依据：学历门槛 + 公司情报实搜 + 你的历史回应率）">📈 只看友好</button>
-  <button class="btn-set" id="f-urgent" onclick="toggleUrgent()">⏰ 7天内截止</button>
-  <button class="btn-set" id="f-region" onclick="toggleRegion()">📍 只看目标地区</button>
-  <button class="btn-set" id="f-pfocus" onclick="toggleProfileFocus()">🎯 按画像聚焦</button>
-  <button class="btn-refresh" onclick="loadJobs()">刷新</button>
-  <button class="btn-refresh" onclick="rescore()">🔄 重算</button>
-  <button class="btn-scan" onclick="scan()">扫岗位</button>
-  <button class="btn-set" onclick="openSet()">⚙ 画像</button>
+  <button class="btn-scan" onclick="scan()" style="margin-left:auto">扫岗位</button>
   <button class="btn-more" id="f-more" onclick="toggleMore()">更多筛选 ▾</button>
 </div>
 
 <div class="more" id="morePanel" style="display:none">
+  <select id="f-source" onchange="loadJobs()"><option value="">全部来源</option></select>
   <select id="f-batch" onchange="loadJobs()"><option value="">全部批次</option><option>提前批</option><option>秋招</option><option>春招</option><option>补录</option><option>实习</option><option>其他</option></select>
   <select id="f-status" onchange="loadJobs()"><option value="">全部状态</option><option>新</option><option>已看</option><option>已投</option><option>笔试</option><option>面试</option><option>挂</option><option>OC</option></select>
   <select id="f-ent" onchange="loadJobs()"><option value="">全部性质</option><option>央企</option><option>国企</option><option>外企</option><option>民企</option><option>事业单位</option><option>其他</option></select>
   <select id="f-exam" onchange="loadJobs()"><option value="">笔试：不限</option><option>免笔试</option><option>有笔试</option></select>
   <input id="f-city" type="text" placeholder="城市筛选" />
   <input id="f-score" type="number" placeholder="最低分" style="width:78px" />
+  <button class="btn-set" id="f-urgent" onclick="toggleUrgent()">⏰ 7天内截止</button>
+  <button class="btn-set" id="f-region" onclick="toggleRegion()">📍 只看目标地区</button>
+  <button class="btn-set" id="f-pfocus" onclick="toggleProfileFocus()">🎯 按画像聚焦</button>
   <button class="btn-set" id="f-real" onclick="toggleReal()">✓ 只看真实投递</button>
   <button class="btn-set" id="f-edu" onclick="toggleEdu()">🎓 学历门槛</button>
+  <button class="btn-refresh" onclick="loadJobs()">↻ 刷新</button>
+  <button class="btn-refresh" onclick="rescore()">🔄 重算匹配分</button>
+  <button class="btn-set" onclick="openSet()">⚙ 我的求职画像</button>
 </div>
 
 <div class="hidden-bar" id="hiddenBar" style="display:none">

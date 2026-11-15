@@ -73,6 +73,7 @@
 
 <script src="/static/common.js"></script>
 <script>
+const TOKEN = "__WEB_TOKEN__";   // 由服务端注入；HermesUI 自动读取
 const { esc } = HermesUI;
 renderNav("traces");
 const traceUrl = (q) => "/api/traces?" + q;
