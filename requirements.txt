@@ -11,3 +11,6 @@ certifi>=2023.7.22
 # 必须锁 <2：mcp 2.x 把 FastMCP 改名为 MCPServer，本项目用 v1 API，
 # 装到 2.x 会导致 import 失败 → MCP 工具静默降级（不报错，最难排查的一类故障）
 mcp>=1.2.0,<2
+
+# Redis 热缓存（可选：REDIS_URL 未配置时自动降级 SQLite）
+redis>=5.0.0

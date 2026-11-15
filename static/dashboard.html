@@ -150,6 +150,7 @@ function render(d) {
     { num: reports.length, label: "日报存档" },
     { num: ts.total, label: "工具调用 Trace" },
     { num: (ts.error_rate * 100).toFixed(1) + "%", label: "调用错误率" },
+    { num: (d.cache || {}).backend === "redis" ? "Redis" : "SQLite", label: "热缓存后端" },
   ];
 
   let html = '<div class="hs-stat-grid">';

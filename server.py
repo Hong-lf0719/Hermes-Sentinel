@@ -122,6 +122,65 @@ def _now_local() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ── Redis 热缓存层：会话热数据读加速（可选增强） ──
+# 设计原则：
+#   1. SQLite 是唯一事实源；Redis 只镜像"最近 60 条热消息"加速读取
+#   2. 任何 Redis 异常一律静默降级回 SQLite——缓存失效最多变慢，绝不影响主流程
+#   3. REDIS_URL 未配置 → 功能整体关闭，行为与旧版完全一致
+REDIS_URL = os.getenv("REDIS_URL", "")
+_HOT_TTL_S = 7 * 24 * 3600
+_hot_redis = None
+_hot_redis_fail_until = 0.0
+_hot_redis_hits = 0
+_hot_redis_misses = 0
+
+
+def _hot_redis_client():
+    """惰性连接 Redis；失败进入 60 秒退避（期间直接走 SQLite）。"""
+    global _hot_redis, _hot_redis_fail_until
+    if _hot_redis is not None:
+        return _hot_redis
+    if time.time() < _hot_redis_fail_until:
+        return None
+    if not REDIS_URL:
+        _hot_redis_fail_until = time.time() + 60
+        return None
+    try:
+        import redis as redis_lib
+        client = redis_lib.Redis.from_url(
+            REDIS_URL, socket_connect_timeout=2, socket_timeout=2, decode_responses=True
+        )
+        if client.ping():
+            logger.info("Redis 热缓存已连接")
+            _hot_redis = client
+            return client
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Redis 连接失败，60 秒内降级 SQLite: {e}")
+    _hot_redis_fail_until = time.time() + 60
+    return None
+
+
+def _cache_key(session_id: str) -> str:
+    return f"hermes:conv:{session_id}"
+
+
+def _cache_push(session_id: str, entry: dict) -> None:
+    """写穿透：SQLite 已写成功后同步镜像到 Redis（失败静默降级）。"""
+    global _hot_redis
+    rc = _hot_redis_client()
+    if rc is None:
+        return
+    try:
+        key = _cache_key(session_id)
+        rc.rpush(key, json.dumps(entry, ensure_ascii=False))
+        rc.ltrim(key, -60, -1)
+        rc.expire(key, _HOT_TTL_S)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Redis 写缓存失败（降级 SQLite）: {e}")
+        _hot_redis = None
+        _hot_redis_fail_until = time.time() + 60
+
+
 def init_db():
     with get_db() as db:
         db.execute("""
@@ -207,7 +266,19 @@ def update_profile(key: str, value: str) -> None:
         db.commit()
 
 def load_history(session_id: str, max_messages: int = 30) -> list[dict]:
-    """加载对话历史"""
+    """加载对话历史（Redis 热缓存优先命中；未命中回源 SQLite 并回填缓存）。"""
+    global _hot_redis_hits, _hot_redis_misses
+    rc = _hot_redis_client()
+    if rc is not None:
+        try:
+            raw = rc.lrange(_cache_key(session_id), -max_messages, -1)
+            msgs = [json.loads(x) for x in raw]
+            msgs = [m for m in msgs if m.get("role") in ("user", "assistant", "system")]
+            _hot_redis_hits += 1
+            return msgs[-max_messages:]
+        except Exception as e:  # noqa: BLE001
+            _hot_redis_misses += 1
+            logger.warning(f"Redis 读缓存失败，回源 SQLite: {e}")
     with get_db() as db:
         rows = db.execute(
             "SELECT role, content FROM conversations "
@@ -219,6 +290,20 @@ def load_history(session_id: str, max_messages: int = 30) -> list[dict]:
     for row in reversed(rows):
         if row["role"] in ("system", "user", "assistant"):
             messages.append({"role": row["role"], "content": row["content"]})
+
+    # 热缓存回填：本次从 SQLite 回源后写入 Redis，下次同会话直接命中
+    rc = _hot_redis_client()
+    if rc is not None and messages:
+        try:
+            key = _cache_key(session_id)
+            pipe = rc.pipeline()
+            pipe.delete(key)
+            for m in messages:
+                pipe.rpush(key, json.dumps(m, ensure_ascii=False))
+            pipe.expire(key, _HOT_TTL_S)
+            pipe.execute()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Redis 缓存回填失败: {e}")
     return messages
 
 def save_message(session_id: str, role: str, content: str, tool_name: str = None, tool_result: str = None):
@@ -229,6 +314,8 @@ def save_message(session_id: str, role: str, content: str, tool_name: str = None
             "VALUES (?,?,?,?,?,?)",
             (session_id, role, content, tool_name, tool_result, _now_local())
         )
+    # 热缓存同步：写穿透（SQLite 为事实源，Redis 加速后续读取）
+    _cache_push(session_id, {"role": role, "content": content})
 
 
 def _save_trace(session_id: str, tool_name: str, tool_args: dict,
@@ -2797,6 +2884,12 @@ async def index():
 async def reset(session_id: str = "default"):
     with get_db() as db:
         db.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
+    rc = _hot_redis_client()
+    if rc is not None:
+        try:
+            rc.delete(_cache_key(session_id))
+        except Exception:  # noqa: BLE001
+            pass
     return {"status": "ok"}
 
 @app.get("/health")
@@ -2893,6 +2986,19 @@ def _dashboard_data() -> dict:
         for t in TOOLS
     ]
     data["model"] = MODEL
+
+    # Redis 热缓存状态（可选增强：未配置/不可达时为关闭态）
+    rc = _hot_redis_client()
+    data["cache"] = {
+        "backend": "redis" if rc is not None else "sqlite",
+        "hits": _hot_redis_hits,
+        "misses": _hot_redis_misses,
+    }
+    if rc is not None:
+        try:
+            data["cache"]["used_memory"] = rc.info("memory").get("used_memory_human", "")
+        except Exception:  # noqa: BLE001
+            pass
     return data
 
 
