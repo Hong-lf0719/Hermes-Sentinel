@@ -1331,6 +1331,9 @@ async def company_research(company: str = "", focus: str = "") -> str:
     return _intel_reply_text(company, intel)
 
 
+
+
+
 # —— 简单 TTL 缓存：缓解 GitHub/arXiv/HN/新闻 外部 API 限流（日报频繁生成时不重复打）——
 _FETCH_CACHE: dict[str, tuple[float, object]] = {}
 
@@ -3662,6 +3665,79 @@ def _has_table(name: str) -> bool:
         ).fetchone() is not None
 
 
+# ── 情报批量补全：给高分候选公司批量生成情报卡（后台任务，配额可控） ──
+# 目的：让匹配中心的"学历友好/成功率信号"有真实区分度——情报覆盖面
+# 越大，信号越有区分度。节流 + 状态可查，防止 Tavily/LLM 配额失控。
+_intel_backfill: dict = {"running": False, "done": 0, "total": 0,
+                         "current": "", "errors": [], "started_at": ""}
+
+_INTEL_BACK_FILL_PAUSE_S = 2   # 每家公司之间停 2 秒（Tavily + LLM 配额保护）
+
+
+async def _intel_backfill_task(limit: int = 20, min_score: int = 60):
+    from job_sentinel.store import get_db as js_get_db
+    _intel_backfill.update({"running": True, "done": 0, "total": 0, "current": "",
+                            "errors": [], "started_at": _now_local()})
+    logger.info(f"情报批量补全开始：limit={limit}, min_score={min_score}")
+    try:
+        with js_get_db(str(DB_PATH)) as c:
+            rows = c.execute(
+                "SELECT company, MAX(match_score) AS ms FROM jobs WHERE user_hidden=0 "
+                "GROUP BY company HAVING ms >= ? ORDER BY ms DESC LIMIT ?",
+                (min_score, limit * 2),
+            ).fetchall()
+        # 只调研"没有新鲜情报"的公司（缓存 7 天内有效则跳过）
+        targets = []
+        for r in rows:
+            co = (r["company"] or "").strip()
+            cached = _load_company_intel(co)
+            if cached and not _intel_stale(cached):
+                continue
+            targets.append((co, r["ms"]))
+            if len(targets) >= limit:
+                break
+        _intel_backfill["total"] = len(targets)
+        for co, ms in targets:
+            if _SHUTDOWN.is_set():
+                break
+            _intel_backfill["current"] = co
+            try:
+                await company_research(co)
+                _intel_backfill["done"] += 1
+            except Exception as e:  # noqa: BLE001
+                _intel_backfill["errors"].append(f"{co}: {e}")
+                _intel_backfill["done"] += 1
+            await asyncio.sleep(_INTEL_BACK_FILL_PAUSE_S)
+        logger.info(
+            f"情报批量补全完成：{_intel_backfill['done']}/{_intel_backfill['total']}，"
+            f"错误 {_len(_intel_backfill['errors']) if True else 0}"
+        )
+    except Exception as e:  # noqa: BLE001
+        _intel_backfill["running"] = False
+        logger.warning(f"情报批量补全异常终止: {e}")
+    finally:
+        _intel_backfill["running"] = False
+
+
+def _len(x):
+    return len(x) if x else 0
+
+
+@app.post("/api/intel/backfill", dependencies=[Depends(require_auth)])
+async def api_intel_backfill(limit: int = 20, min_score: int = 60):
+    """启动批量情报补全（后台执行）。配额参考：20 家 ≈ 160 次 Tavily + 20 次 LLM。"""
+    if _intel_backfill.get("running"):
+        raise HTTPException(status_code=409, detail="批量调研已在进行中，请等它结束")
+    asyncio.create_task(_intel_backfill_task(limit, min_score))
+    return {"started": True, "limit": limit, "min_score": min_score}
+
+
+@app.get("/api/intel/backfill/status")
+async def api_intel_backfill_status():
+    return {**_intel_backfill,
+            "tavily_configured": bool(os.getenv("TAVILY_API_KEY"))}
+
+
 # ── 用户画像（user_profile 表）读写：画像中心 UI 用 ──
 @app.get("/api/user-profile")
 async def api_user_profile_get():
@@ -3821,6 +3897,9 @@ async def api_match_companies():
         m["company"] = company
         m["intel_stale"] = bool(intel_entry and (intel_entry or {}).get("stale"))
         m["has_intel"] = bool(intel_entry)
+        iv = (intel_entry or {}).get("intel") or {}
+        m["school_barrier"] = iv.get("school_barrier") or ""
+        m["school_note"] = iv.get("school_note") or ""
         m["best_url"] = best.get("url") or ""
         out.append(m)
     out.sort(key=lambda m: -m["score"])

@@ -717,8 +717,12 @@ def success_signal(job, researched: dict, response_by_type: dict) -> dict:
     intel = researched.get((job.company or "").strip())
     if intel:
         barrier = intel.get("school_barrier") or "未知"
+        conf = intel.get("confidence") or "低"
         note = (intel.get("school_note") or "")[:44]
-        if barrier == "宽松":
+        # 置信度门槛：低证据的情报不参与打分（避免把"未检索到"当结论）
+        if conf == "低" or barrier == "未知":
+            reasons.append(f"情报证据不足，学历门槛按中性计（{note or '未生成情报'}）")
+        elif barrier == "宽松":
             add += 5.0
             reasons.append(f"情报实搜：学历门槛宽松（{note}）")
         elif barrier == "严格":

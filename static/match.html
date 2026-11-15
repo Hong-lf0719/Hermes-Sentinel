@@ -66,6 +66,13 @@
   .mini-main { flex: 1; min-width: 0; color: var(--txt); }
   .mini-status { flex: 0 0 auto; color: var(--sub); font-size: 11px; }
   .loading { text-align: center; color: var(--sub); padding: 40px; }
+  /* 情报门槛徽章 */
+  .ibarrier { font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 8px; display: inline-block; }
+  .ibarrier.b-loose { background: #14532d; color: #4ade80; }
+  .ibarrier.b-mid { background: #78350f; color: #fcd34d; }
+  .ibarrier.b-strict { background: #7f1d1d; color: #fca5a5; }
+  #backfillBtn { background: var(--card2); color: var(--txt); border: 1px solid var(--line); }
+  #backfillBtn:hover { border-color: var(--acc); }
   .empty { text-align: center; color: var(--sub); padding: 40px 16px; line-height: 1.8; }
   .stale-note { font-size: 11px; color: var(--warn); margin-top: 4px; }
   @media (max-width: 700px) { .mhead { flex-direction: column; } .dims { grid-template-columns: 1fr 1fr; } }
@@ -109,6 +116,10 @@
     <div class="pref-foot">
       <button class="hs-btn" id="prefSave">保存偏好并重算匹配度</button>
       <span class="hint">学历门槛 / 目标城市 / 方向等基础画像在 岗位雷达 → ⚙ 我的求职画像 里改</span>
+    </div>
+    <div style="margin-top:12px;padding-top:12px;border-top:1px dashed var(--line)">
+      <button class="hs-btn" id="backfillBtn" style="background:var(--card2);color:var(--txt);border:1px solid var(--line)">🧠 批量调研 Top 公司（生成学历门槛情报）</button>
+      <span id="backfillStatus" style="font-size:11.5px;color:var(--sub);margin-left:10px"></span>
     </div>
   </div>
 
@@ -177,6 +188,11 @@ function companyCard(m) {
   const intelNote = m.has_intel
     ? (m.intel_stale ? '<div class="stale-note">⚠ 公司情报已超 7 天，点岗位卡「🔍 情报」刷新</div>' : "")
     : '<div class="stale-note">该公司尚未生成情报卡——在岗位卡点「🔍 情报」后，学历/口碑信号会进入匹配度</div>';
+  // 情报门槛徽章：有证据（置信度≠低）才显示，低置信不误导
+  const bar = m.school_barrier || "";
+  const bcls = { "宽松": "b-loose", "一般": "b-mid", "严格": "b-strict" }[bar] || "";
+  const badge = (bar && bcls)
+    ? `<span class="ibarrier ${bcls}" title="${esc(m.school_note || "")}">🎓 门槛${esc(bar)}</span>` : "";
   const dims = [
     { k: "job",  label: "岗位匹配", v: m.dims.job,  max: 60 },
     { k: "edu",  label: "学历友好", v: m.dims.edu,  max: 15 },
@@ -209,6 +225,7 @@ function companyCard(m) {
         <div class="meta">
           <span>💼 ${m.n_jobs} 个在库岗位</span>
           <span>🏛 ${esc(m.best_enterprise_type || "性质未知")}</span>
+          ${badge}
           ${m.best_industry ? `<span>🔧 ${esc(m.best_industry)}</span>` : ""}
           ${m.has_intel ? "" : '<span style="color:var(--warn)">⚪ 情报未生成</span>'}
           ${m.intel_stale ? '<span style="color:var(--warn)">情报已过期</span>' : ""}
@@ -224,6 +241,32 @@ function companyCard(m) {
     ${intelNote}
   </div>`;
 }
+
+renderNav("match");
+
+/* ── 批量情报调研：启动后台任务 + 轮询进度，完成后自动刷新推荐列表 ── */
+let _bfPoll = null;
+async function startBackfill() {
+  const btn = document.getElementById("backfillBtn");
+  const st = document.getElementById("backfillStatus");
+  try {
+    await api("/api/intel/backfill?limit=20&min_score=60", { method: "POST" });
+    btn.disabled = true;
+    st.textContent = "批量调研进行中…";
+    _bfPoll = setInterval(async () => {
+      try {
+        const s = await api("/api/intel/backfill/status");
+        st.textContent = s.running
+          ? `调研中 ${s.done}/${s.total}：${s.current || ""}`
+          : `✅ 完成 ${s.done}/${s.total}（失败 ${s.errors.length}）——推荐列表已按新情报刷新`;
+        if (!s.running) { clearInterval(_bfPoll); load(); }
+      } catch (e) { /* 忽略单次轮询失败 */ }
+    }, 2000);
+  } catch (e) {
+    st.textContent = "启动失败：" + e.message;
+  }
+}
+document.getElementById("backfillBtn").onclick = startBackfill;
 
 load();
 </script>
