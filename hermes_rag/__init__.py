@@ -13,17 +13,20 @@
 from __future__ import annotations
 
 from .store import KnowledgeStore
-from .embeddings import TfidfEmbedder, DenseEmbedder, create_embedder
+from .pgstore import PgVectorStore
+from .embeddings import TfidfEmbedder, DenseEmbedder, FixedHashEmbedder, create_embedder
 from .chunking import chunk_text, chunk_markdown
 from .rag import get_store, retrieve_context
 from .exceptions import RAGError, DocumentError, EmbeddingError, StoreError
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "KnowledgeStore",
+    "PgVectorStore",
     "TfidfEmbedder",
     "DenseEmbedder",
+    "FixedHashEmbedder",
     "create_embedder",
     "chunk_text",
     "chunk_markdown",

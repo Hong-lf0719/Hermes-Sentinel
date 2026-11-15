@@ -19,6 +19,7 @@ store 层不感知具体实现 —— 体现「面向接口编程、可插拔替
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import re
@@ -140,6 +141,41 @@ class DenseEmbedder:
         return int(self._model.get_sentence_embedding_dimension())
 
 
+class FixedHashEmbedder:
+    """固定维度哈希嵌入器（零模型、零状态、维度恒定）。
+
+    设计动机：PGVector 等「外部向量库」后端要求向量维度在建表后恒定，
+    而 TfidfEmbedder 的维度随词表增长而变化，无法直接落库。
+    本实现用双哈希词袋（token → 两个哈希桶累加 → L2 归一）：
+      - 维度恒定（默认 512），确定性输出（同文本恒得同向量）
+      - 无需下载模型权重，纯本地计算
+    质量介于 TF-IDF 与稠密语义模型之间：保留了词面召回能力，无语义扩展。
+    """
+
+    def __init__(self, dim: int = 512) -> None:
+        self._dim = int(dim)
+
+    def fit(self, corpus: Optional[List[str]] = None) -> None:
+        """无状态嵌入器，fit 为空操作（保持接口一致）。"""
+        return None
+
+    def transform(self, text: str) -> np.ndarray:
+        vec = np.zeros(self._dim, dtype=np.float32)
+        for t in tokenize(text):
+            d = t.encode("utf-8")
+            h1 = int(hashlib.md5(d).hexdigest()[:8], 16) % self._dim
+            h2 = int(hashlib.sha1(d).hexdigest()[:8], 16) % self._dim
+            vec[h1] += 1.0
+            vec[(h1 + h2) % self._dim] += 0.5  # 双哈希降低碰撞
+        norm = float(np.linalg.norm(vec))
+        if norm > 0:
+            vec = vec / norm
+        return vec.astype(np.float32)
+
+    def dim(self) -> int:
+        return self._dim
+
+
 def create_embedder(kind: Optional[str] = None):
     """工厂：按名字创建嵌入器。
 
@@ -148,4 +184,6 @@ def create_embedder(kind: Optional[str] = None):
     kind = (kind or os.getenv("HERMES_EMBEDDING", "tfidf")).lower()
     if kind in ("dense", "sentence-transformers", "st"):
         return DenseEmbedder()
+    if kind in ("hash", "fixed", "fixed-hash"):
+        return FixedHashEmbedder()
     return TfidfEmbedder()
