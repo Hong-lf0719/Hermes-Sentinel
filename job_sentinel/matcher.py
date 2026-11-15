@@ -679,6 +679,70 @@ _LINK_BONUS = {"官方网申": 3, "简章详情": 2, "官方校招页": 1, "源�
 _SOURCE_PENALTY: dict[str, int] = {}
 
 
+# ── 成功率信号：把"民办二本投大厂容易石沉大海"变成显式可评估的信号 ──
+# 三路信号全部可溯源，不做主观臆断：
+#   1) 岗位学历文本：本科可投/不限 → 友好；仅硕士 → 不友好
+#   2) 公司情报实搜（company_intel.school_barrier）：宽松 +5 / 严格 -5
+#   3) 用户自身历史回复率：按企业性质分组的实测回应率（样本 ≥3 才计权）
+# 输出 {add, level, reasons}。这是对"投递成功率"的信号评估，不是保证——
+# 展示层必须标注"信号非保证，口碑类内容为主观评价"。
+
+def education_friendliness(education: str) -> tuple[float, str]:
+    """岗位学历文本 → (加扣分, 依据一句话)。"""
+    edu = (education or "").strip()
+    has_bk = "本科" in edu
+    has_master = ("硕士" in edu or "研究生" in edu)
+    if has_master and not has_bk:
+        return -6.0, "仅硕士可投（本科无门）"
+    if "不限" in edu or has_bk:
+        return 4.0, "本科可投"
+    if not edu:
+        return 0.0, "学历要求未标注"
+    return 0.0, f"学历要求：{edu[:20]}"
+
+
+def success_signal(job, researched: dict, response_by_type: dict) -> dict:
+    """三路成功率信号合成（不影响 match_score 本身，作为独立维度展示/排序）。
+
+    researched: {公司名: intel_dict}（company_intel 表，已过审公司才有序）
+    response_by_type: {企业性质: {applied, response_rate}}（用户自身投递实测）
+    """
+    reasons: list[str] = []
+    add = 0.0
+
+    edu_add, edu_note = education_friendliness(job.education)
+    add += edu_add
+    reasons.append(edu_note)
+
+    intel = researched.get((job.company or "").strip())
+    if intel:
+        barrier = intel.get("school_barrier") or "未知"
+        note = (intel.get("school_note") or "")[:44]
+        if barrier == "宽松":
+            add += 5.0
+            reasons.append(f"情报实搜：学历门槛宽松（{note}）")
+        elif barrier == "严格":
+            add -= 5.0
+            reasons.append(f"情报实搜：学历门槛严格（{note}）")
+        else:
+            reasons.append(f"情报实搜：门槛{barrier}（{note}）")
+
+    etype = (job.enterprise_type or "").strip()
+    rs = response_by_type.get(etype)
+    if rs and rs.get("applied", 0) >= 3:
+        rate = rs["response_rate"]
+        pct = int(rate * 100)
+        if rate >= 0.34:
+            add += 3.0
+            reasons.append(f"你的实测：{etype}回应率 {pct}%（{rs['applied']} 家样本）")
+        elif rate < 0.1:
+            add -= 3.0
+            reasons.append(f"你的实测：{etype}回应率 {pct}%（{rs['applied']} 家样本，暂无回音）")
+
+    level = "高" if add >= 6 else ("低" if add <= -3 else "中")
+    return {"add": round(add, 1), "level": level, "reasons": reasons}
+
+
 def score_job(job: Job, profile: dict, today: str = "") -> tuple[int, str]:
     """加权打分 0-100 + 一句话理由。权重之和恰为 100，无需截断。
 

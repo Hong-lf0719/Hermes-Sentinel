@@ -3191,6 +3191,7 @@ async def api_jobs(
     only_region: bool = False,
     edu_filter: bool = False,
     profile_focus: bool = False,
+    school_friendly: bool = False,
 ):
     """岗位列表。
 
@@ -3203,7 +3204,7 @@ async def api_jobs(
     from pathlib import Path as _P
     from job_sentinel.store import get_db as js_get_db, get_jobs
     from job_sentinel.profile import load_profile
-    from job_sentinel.matcher import days_to_deadline, suggest_fill
+    from job_sentinel.matcher import days_to_deadline, success_signal, suggest_fill
 
     prof_path = _P(__file__).parent / "job_sentinel" / "profile.json"
     profile = load_profile(prof_path)
@@ -3251,12 +3252,54 @@ async def api_jobs(
 
     # 补全建议：仅对 industry/major 为空的岗，按标题启发式给「建议方向」，不落库
     out = []
+    # 成功率信号：三路可溯源信号合成（学历文本 + 公司情报实搜 + 自身历史回复率）
+    researched = {}
+    try:
+        with get_db() as db:
+            for r in db.execute("SELECT company, intel_json FROM company_intel").fetchall():
+                try:
+                    researched[r["company"]] = json.loads(r["intel_json"])
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"公司情报读取失败（成功率信号降级）: {e}")
+    resp_by_type = {}
+    try:
+        with get_db() as db:
+            rows = db.execute(
+                "SELECT enterprise_type AS g, status, COUNT(*) AS n FROM jobs "
+                "WHERE status IN ('已投','笔试','面试','OC','挂') "
+                "AND TRIM(COALESCE(enterprise_type,'')) != '' "
+                "GROUP BY enterprise_type, status"
+            ).fetchall()
+        agg: dict = {}
+        for r in rows:
+            g = agg.setdefault(r["g"], {"applied": 0, "responded": 0})
+            g["applied"] += r["n"]
+            if r["status"] in ("笔试", "面试", "OC", "挂"):
+                g["responded"] += r["n"]
+        resp_by_type = {g: {"applied": v["applied"],
+                            "response_rate": round(v["responded"] / v["applied"], 2) if v["applied"] else 0}
+                        for g, v in agg.items()}
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"回复率统计读取失败（成功率信号降级）: {e}")
+
     for j in jobs:
         d = j.to_dict()
+        d["success"] = success_signal(j, researched, resp_by_type)
         sug = suggest_fill(j)
         if sug:
             d["suggest"] = sug
         out.append(d)
+
+    # 只看学历友好（成功率信号非"低"），并支持按成功率信号排序
+    if school_friendly:
+        out = [d for d in out if (d.get("success") or {}).get("level") != "低"]
+    if sort == "success":
+        out.sort(key=lambda d: (
+            (d.get("success") or {}).get("add", 0),
+            d.get("match_score", 0),
+        ), reverse=True)
     return {"jobs": out, "count": len(out)}
 
 

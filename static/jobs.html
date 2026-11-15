@@ -99,6 +99,11 @@
   .ent-民企{background:var(--card2);color:var(--sub)}
   .ent-其他{background:var(--card2);color:#94a3b8}
   /* 笔试标注：免笔试=亮绿醒目 有笔试=灰 */
+  /* 成功率信号：高=绿 中=蓝 低=红（title 悬浮展示三路依据） */
+  .succ{font-style:normal;font-size:11px;padding:2px 7px;border-radius:20px;margin-left:6px;vertical-align:middle;font-weight:700}
+  .succ.s-高{background:#14532d;color:#4ade80}
+  .succ.s-中{background:#0c4a6e;color:#7dd3fc}
+  .succ.s-低{background:#7f1d1d;color:#fca5a5}
   .exam-free{font-style:normal;font-size:11px;padding:2px 7px;border-radius:20px;margin-left:6px;vertical-align:middle;font-weight:700;background:#14532d;color:#4ade80}
   .exam-yes{font-style:normal;font-size:11px;padding:2px 7px;border-radius:20px;margin-left:6px;vertical-align:middle;font-weight:600;background:var(--card2);color:#94a3b8}
   .empty{text-align:center;color:var(--sub);padding:40px 20px;line-height:1.7}
@@ -205,12 +210,14 @@
   </select>
   <select id="f-sort" onchange="loadJobs()">
     <option value="score">按匹配分</option>
+    <option value="success">按成功率信号</option>
     <option value="deadline">按截止日（最急优先）</option>
     <option value="new">按最新发现</option>
   </select>
   <select id="f-source" onchange="loadJobs()"><option value="">全部来源</option></select>
   <input type="text" id="f-kw" placeholder="🔍 搜公司 / 职位…" oninput="loadJobs()" style="min-width:130px">
   <button class="btn-set" id="f-group" onclick="toggleGroup()" title="同一公司的多个岗位合并为一组，只展开最高分岗位">🏢 公司聚合</button>
+  <button class="btn-set" id="f-friendly" onclick="toggleFriendly()" title="隐藏成功率信号为「低」的岗位（依据：学历门槛 + 公司情报实搜 + 你的历史回应率）">📈 只看友好</button>
   <button class="btn-set" id="f-urgent" onclick="toggleUrgent()">⏰ 7天内截止</button>
   <button class="btn-set" id="f-region" onclick="toggleRegion()">📍 只看目标地区</button>
   <button class="btn-set" id="f-pfocus" onclick="toggleProfileFocus()">🎯 按画像聚焦</button>
@@ -331,6 +338,7 @@ const STATUSES = ["新","已看","已投","笔试","面试","挂","OC"];
 let onlyReal = false;  // 只看真实投递（状态已推进 或 浏览器扩展主动投的）
 let urgentOnly = false;  // 只看 7 天内截止
 let groupByCompany = true;  // 公司聚合：同公司合并为一组（默认开，缓解大国企刷屏）
+let schoolFriendly = false; // 只看成功率信号非「低」的岗位（依据：学历门槛+情报+历史回应率）
 let GROUP_INDEX = {};       // hash → job，供折叠行展开成完整卡片
 let onlyRegion = true;   // 默认开：画像有目标地区则默认只显示目标地区（解决「没标北京却满屏北京」）
 let profileFocus = false;  // 按画像聚焦（求职方向/专业/招聘类型 硬过滤岗位集）
@@ -343,7 +351,7 @@ function saveFilters(){
   try{
     localStorage.setItem(LS_KEY, JSON.stringify({
       onlyRegion, profileFocus, urgentOnly, onlyReal, eduFilter,
-      group: groupByCompany,
+      group: groupByCompany, friendly: schoolFriendly,
       tier: document.getElementById("f-tier").value,
       sort: document.getElementById("f-sort").value,
       source: document.getElementById("f-source").value,
@@ -364,6 +372,7 @@ function loadFilters(){
     onlyRegion=!!s.onlyRegion; profileFocus=!!s.profileFocus; urgentOnly=!!s.urgentOnly;
     onlyReal=!!s.onlyReal; eduFilter=!!s.eduFilter;
     groupByCompany=(s.group===undefined)?true:!!s.group;   // 首次无记录 → 默认开启聚合
+    schoolFriendly=!!s.friendly;
     const set=(id,v)=>{const e=document.getElementById(id); if(e&&v!=null)e.value=v;};
     set("f-tier",s.tier); set("f-sort",s.sort); set("f-source",s.source);
     set("f-batch",s.batch); set("f-status",s.status); set("f-ent",s.ent);
@@ -377,6 +386,7 @@ function applyToggleClasses(){
   document.getElementById("f-pfocus").classList.toggle("on",profileFocus);
   document.getElementById("f-real").classList.toggle("on",onlyReal);
   const gb=document.getElementById("f-group"); if(gb) gb.classList.toggle("on",groupByCompany);
+  const fb=document.getElementById("f-friendly"); if(fb) fb.classList.toggle("on",schoolFriendly);
   const eb=document.getElementById("f-edu"); if(eb) eb.classList.toggle("on",eduFilter);
 }
 let MY_REGIONS = [];     // 画像地区（用于卡片「外地」标识 / 三不中判断）
@@ -420,6 +430,7 @@ async function loadJobs(){
   if(onlyRegion)q.set("only_region","1");
   if(profileFocus)q.set("profile_focus","1");
   if(eduFilter)q.set("edu_filter","1");
+  if(schoolFriendly)q.set("school_friendly","1");
   if(includeHiddenOnce)q.set("include_hidden","1");
   // 分档与「最低分」并存时取更严的下限，避免互相打架
   let lo=sc?Number(sc):0, hi=0;
@@ -450,6 +461,12 @@ async function loadJobs(){
   }
   list.innerHTML=d.jobs.map(cardHTML).join("");
   loadStats();
+}
+function toggleFriendly(){
+  schoolFriendly=!schoolFriendly;
+  document.getElementById("f-friendly").classList.toggle("on",schoolFriendly);
+  saveFilters();
+  loadJobs();
 }
 function toggleGroup(){
   groupByCompany=!groupByCompany;
@@ -531,6 +548,9 @@ function cardHTML(j){
   const triTag = triMiss?`<em class="tag-tri" title="地区不符·方向不中·学历够不着，建议确认后标记不投">⚠ 三不中</em>`:"";
   const entTag = j.enterprise_type?`<em class="ent ent-${esc(j.enterprise_type)}">🏛 ${esc(j.enterprise_type)}</em>`:"";
   const examTag = j.exam_free==="免笔试"?`<em class="exam-free">⚡ 免笔试</em>`:(j.exam_free==="有笔试"?`<em class="exam-yes">📝 有笔试</em>`:"");
+  // 成功率信号徽章：三路可溯源信号（学历门槛+情报实搜+历史回应率），title 展示依据
+  const succ = j.success || {};
+  const succTag = succ.level ? `<em class="succ s-${esc(succ.level)}" title="${esc((succ.reasons||[]).join("；"))}">📈 ${esc(succ.level)}</em>` : "";
   // 建议值放 data-* 属性传给「采用」：旧版从 DOM 文本正则反解（找「行业X 专业Y」），
   // 而渲染文本里并没有这两个字 → 永远解析失败、按钮永远提示「无可采纳内容」。
   const sug=j.suggest?`<div class="suggest" data-ind="${esc(j.suggest.industry||"")}" data-maj="${esc(j.suggest.major||"")}">💡 建议方向补全：${esc([j.suggest.industry,j.suggest.major].filter(Boolean).join(" / "))}<button class="mini-btn" onclick="adoptSuggest('${j.raw_hash}',this)">采用</button></div>`:"";
@@ -538,7 +558,7 @@ function cardHTML(j){
     <div class="ctop">
       <div class="score ${scls}">${score}</div>
       <div class="cmain">
-        <div class="company">${j.company?esc(j.company):'<span class="co-unk">公司未公开</span>'} <em class="tier ${tu.cls}">${tu.ico} ${tier}</em>${entTag}${examTag}${outTag}${triTag}</div>
+        <div class="company">${j.company?esc(j.company):'<span class="co-unk">公司未公开</span>'} <em class="tier ${tu.cls}">${tu.ico} ${tier}</em>${entTag}${examTag}${outTag}${triTag}${succTag}</div>
         <div class="title">${esc(j.title)}</div>
       </div>
       <div class="batch">${esc(j.batch||"其他")}</div>
