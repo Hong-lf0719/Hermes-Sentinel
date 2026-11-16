@@ -3414,6 +3414,36 @@ async def api_job_status(raw_hash: str, request: Request):
     return {"ok": True, "raw_hash": raw_hash, "status": status}
 
 
+@app.post("/api/jobs/batch-status", dependencies=[Depends(require_auth)])
+async def api_jobs_batch_status(request: Request):
+    """批量回写投递状态：勾选多张岗位卡一键标记（把"标记已投"的成本降到一次点击）。
+
+    body: {"hashes": [raw_hash...], "status": "已投"}，上限 200 条/次。
+    返回 changed=实际更新数（非法 hash 静默跳过，不让一条失效指纹毁掉整批）。
+    """
+    from job_sentinel.models import VALID_STATUS
+    from job_sentinel.store import get_db as js_get_db, update_status
+    data = await request.json()
+    hashes = [h for h in (data or {}).get("hashes") or [] if isinstance(h, str)][:200]
+    status = (data or {}).get("status") or ""
+    if not hashes:
+        return JSONResponse(status_code=400,
+                            content={"ok": False, "error": "缺少 hashes"})
+    if status not in VALID_STATUS:
+        return JSONResponse(status_code=400,
+                            content={"ok": False, "error": f"非法状态: {status!r}"})
+    changed = 0
+    with js_get_db(str(DB_PATH)) as c:
+        for h in hashes:
+            try:
+                if update_status(c, h, status):
+                    changed += 1
+            except Exception:  # noqa: BLE001
+                pass
+        c.commit()
+    return {"ok": True, "changed": changed, "status": status}
+
+
 @app.post("/api/jobs/{raw_hash}/hide", dependencies=[Depends(require_auth)])
 async def api_job_hide(raw_hash: str):
     """标记不投（看板隐藏，非删除）。"""

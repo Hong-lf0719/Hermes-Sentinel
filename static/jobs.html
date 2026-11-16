@@ -70,6 +70,26 @@
   .sg{display:flex;gap:4px;flex-wrap:wrap}
   .sg button{padding:5px 9px;font-size:12px;background:var(--card2);color:var(--sub);border:1px solid var(--line);font-weight:500}
   .sg button.on{background:var(--acc);color:#04293a;border-color:var(--acc);font-weight:700}
+  /* 批量标记与投递回访（2026-11-16）：把"投后回写状态"成本降到一次点击 */
+  .pick{flex:0 0 auto;width:15px;height:15px;accent-color:var(--acc);cursor:pointer;margin-top:13px}
+  #selBar{position:fixed;left:0;right:0;bottom:0;z-index:60;display:none;align-items:center;gap:8px;
+          padding:10px 16px;background:var(--card);border-top:1px solid var(--line);
+          box-shadow:0 -4px 18px rgba(0,0,0,.35);flex-wrap:wrap}
+  #selBar .lbl{font-size:13px;color:var(--sub)}
+  #selBar .n{font-weight:800;color:var(--acc);font-size:15px}
+  #selBar button{padding:7px 13px;font-size:12.5px;border-radius:8px;border:1px solid var(--line);
+                 background:var(--card2);color:var(--txt);cursor:pointer;font-weight:600}
+  #selBar button:hover{border-color:var(--acc)}
+  #selBar button.st-已投{background:#0c4a6e;color:#7dd3fc;border-color:#0c4a6e}
+  #selBar button.st-挂{background:#7f1d1d;color:#fca5a5;border-color:#7f1d1d}
+  #selBar .ghost{background:transparent;color:var(--sub)}
+  #applyConfirm{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:70;display:none;
+          align-items:center;gap:10px;padding:10px 16px;background:var(--card);
+          border:1px solid var(--acc);border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.4);max-width:92vw}
+  #applyConfirm .t{font-size:13px;color:var(--txt)}
+  #applyConfirm button{padding:6px 13px;border-radius:8px;border:none;cursor:pointer;font-weight:700;font-size:12.5px}
+  #applyConfirm .yes{background:var(--acc);color:#04293a}
+  #applyConfirm .no{background:var(--card2);color:var(--sub)}
   .apply{margin-left:auto;text-decoration:none;background:var(--good);color:#052e16;padding:7px 12px;border-radius:8px;font-weight:700;font-size:13px}
   .apply.nolink{background:var(--card2);color:var(--sub)}
   /* 链接质量：绿=官方校招页，蓝=源详情页，灰蓝=搜索兜底 */
@@ -250,6 +270,27 @@
   <button class="link-btn" onclick="clearHidden()">全部恢复</button>
 </div>
 
+<!-- 投递回访确认：点投递链接离开后回到页面，问一句"投了吗"——一键回写，喂给漏斗与成功率信号 -->
+<div id="applyConfirm">
+  <span class="t" id="acTxt"></span>
+  <button class="yes" onclick="acYes()">✓ 已投</button>
+  <button class="no" onclick="acNo()">还没投</button>
+</div>
+
+<!-- 批量标记栏：勾选岗位卡后从底部弹出 -->
+<div id="selBar">
+  <span class="lbl">已选 <span class="n" id="selN">0</span> 条</span>
+  <button class="st-已投" onclick="batchStatus('已投')">已投</button>
+  <button onclick="batchStatus('笔试')">笔试</button>
+  <button onclick="batchStatus('面试')">面试</button>
+  <button onclick="batchStatus('OC')">OC</button>
+  <button class="st-挂" onclick="batchStatus('挂')">挂</button>
+  <button onclick="batchStatus('已看')">已看</button>
+  <span style="flex:1"></span>
+  <button class="ghost" onclick="selAll()">全选本页</button>
+  <button class="ghost" onclick="selNone()">取消选择</button>
+</div>
+
 <div class="dash">
   <div class="dh"><span>📊 投递进度（自动汇总，点胶囊筛选）</span><b id="dash-sum"></b></div>
   <div class="caps" id="caps"></div>
@@ -345,6 +386,9 @@ let urgentOnly = false;  // 只看 7 天内截止
 let groupByCompany = true;  // 公司聚合：同公司合并为一组（默认开，缓解大国企刷屏）
 let schoolFriendly = false; // 只看成功率信号非「低」的岗位（依据：学历门槛+情报+历史回应率）
 let GROUP_INDEX = {};       // hash → job，供折叠行展开成完整卡片
+let CUR = [];               // 当前筛选渲染的 hash 列表（批量标记"全选本页"用）
+const JOBMAP = {};          // hash → job 对象（投递回访确认取标题用）
+const SEL = new Set();      // 批量标记勾选集
 let onlyRegion = true;   // 默认开：画像有目标地区则默认只显示目标地区（解决「没标北京却满屏北京」）
 let profileFocus = false;  // 按画像聚焦（求职方向/专业/招聘类型 硬过滤岗位集）
 let eduFilter = true;    // 默认开：自身本科则默认隐藏需硕士岗（看板聚焦开关）
@@ -454,6 +498,9 @@ async function loadJobs(){
   // 关键词过滤（前端，命中公司名/职位名）
   const kw=(document.getElementById("f-kw").value||"").trim().toLowerCase();
   if(kw)d.jobs=d.jobs.filter(j=>(j.company||"").toLowerCase().indexOf(kw)>=0||(j.title||"").toLowerCase().indexOf(kw)>=0);
+  /* 批量标记索引：当前筛选结果全量登记，供"全选本页"与投递回访取岗位信息 */
+  CUR=d.jobs.map(j=>j.raw_hash);
+  d.jobs.forEach(j=>JOBMAP[j.raw_hash]=j);
   const list=document.getElementById("list");
   if(!d.jobs.length){list.innerHTML='<div class="empty">暂无匹配岗位。<br>点「扫岗位」触发哨兵扫描，或放宽分档 / 在「⚙ 画像」调整条件。</div>';loadStats();return;}
   if(groupByCompany){
@@ -528,7 +575,7 @@ function cardHTML(j){
   const scls=score>=75?"s-hi":(score>=60?"s-mid":(score>=45?"s-ok":"s-low"));
   const lu=LINK_UI[j.link_type]||{txt:"打开 ↗",cls:""};
   const link=j.url
-    ? `<a class="apply ${lu.cls}" href="${esc(j.url)}" target="_blank" rel="noopener">${lu.txt}</a>`
+    ? `<a class="apply ${lu.cls}" href="${esc(j.url)}" target="_blank" rel="noopener" onclick="savePendingApply('${j.raw_hash}')">${lu.txt}</a>`
     : `<span class="apply nolink">无链接</span>`;
   const sg=STATUSES.map(st=>`<button class="${st===j.status?'on':''}" onclick="setStatus('${j.raw_hash}','${st}',this)">${st}</button>`).join("");
   // 截止日紧急度：打分理由里已带「⚠N天内截止/已过期」，这里给 meta 上色强化
@@ -561,6 +608,7 @@ function cardHTML(j){
   const sug=j.suggest?`<div class="suggest" data-ind="${esc(j.suggest.industry||"")}" data-maj="${esc(j.suggest.major||"")}">💡 建议方向补全：${esc([j.suggest.industry,j.suggest.major].filter(Boolean).join(" / "))}<button class="mini-btn" onclick="adoptSuggest('${j.raw_hash}',this)">采用</button></div>`:"";
   return `<div class="card" data-hash="${j.raw_hash}">
     <div class="ctop">
+      <input type="checkbox" class="pick" ${SEL.has(j.raw_hash)?"checked":""} title="勾选后底部可批量标记状态" onchange="togglePick('${j.raw_hash}',this.checked)" />
       <div class="score ${scls}">${score}</div>
       <div class="cmain">
         <div class="company">${j.company?esc(j.company):'<span class="co-unk">公司未公开</span>'} <em class="tier ${tu.cls}">${tu.ico} ${tier}</em>${entTag}${examTag}${outTag}${triTag}${succTag}</div>
@@ -622,9 +670,69 @@ async function setStatus(hash,status,btn){
   if(!r.ok){ toast("标记失败（"+r.status+"），请刷新重试"); return; }
   const grp=btn.parentElement; grp.querySelectorAll("button").forEach(b=>b.classList.remove("on"));
   btn.classList.add("on");
-  toast("标记为："+status);
+  toast("标记为："+status+"——投递漏斗与「历史回应」维度都会用上它");
   loadStats();
 }
+
+/* ── 批量标记：勾选多张卡 → 底部弹栏一键回写状态（2026-11-16）── */
+function togglePick(h,on){ on?SEL.add(h):SEL.delete(h); syncSelBar(); }
+function syncSelBar(){
+  document.getElementById("selN").textContent=SEL.size;
+  document.getElementById("selBar").style.display=SEL.size?"flex":"none";
+}
+function selAll(){ CUR.forEach(h=>SEL.add(h)); document.querySelectorAll(".pick").forEach(c=>c.checked=true); syncSelBar(); }
+function selNone(){ SEL.clear(); document.querySelectorAll(".pick").forEach(c=>c.checked=false); syncSelBar(); }
+async function batchStatus(st){
+  if(!SEL.size) return;
+  try{
+    const r=await fetch("/api/jobs/batch-status",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+AUTH_TOKEN},body:JSON.stringify({hashes:[...SEL],status:st})});
+    const d=await r.json();
+    if(d.ok){ toast(`已批量标记 ${d.changed} 条为「${st}」✓`); selNone(); loadJobs(); loadStats(); }
+    else toast("批量标记失败："+(d.error||r.status),true);
+  }catch(e){ toast("批量标记请求出错",true); }
+}
+
+/* ── 投递回访确认：点投递链接 → 回到页面时弹一句"投了吗" → 一键已投 ──
+   解决的真实问题：投递动作发生在外部网站，用户回来后要重新翻找那张卡才能标记，
+   成本太高 → 状态永远停在"新"，成功率学习没有数据。 */
+let _acTimer=null;
+function savePendingApply(hash){
+  const j=JOBMAP[hash]; if(!j) return true;
+  try{ localStorage.setItem("hermes_pending_apply",
+    JSON.stringify({hash, title:(j.title||"").slice(0,42), ts:Date.now()})); }catch(e){}
+  return true;   // 不拦截跳转
+}
+function checkPendingApply(){
+  let p=null;
+  try{ p=JSON.parse(localStorage.getItem("hermes_pending_apply")||"null"); }catch(e){}
+  if(!p) return;
+  const age=Date.now()-(p.ts||0);
+  if(age>864e5){ acNo(); return; }           // 超 24h 的过期清理
+  if(age<15000) return;                       // 刚点开还没来得及投，不打扰
+  document.getElementById("acTxt").textContent="刚打开投递页：「"+p.title+"」— 投了吗？";
+  document.getElementById("applyConfirm").style.display="flex";
+  clearTimeout(_acTimer); _acTimer=setTimeout(acNo,30000);   // 30 秒不打扰自动收起
+}
+async function acYes(){
+  let p=null;
+  try{ p=JSON.parse(localStorage.getItem("hermes_pending_apply")||"null"); }catch(e){}
+  acNo();
+  if(p&&p.hash){
+    try{
+      const r=await fetch("/api/jobs/"+p.hash+"/status",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+AUTH_TOKEN},body:JSON.stringify({status:"已投"})});
+      if(r.ok) toast("已标记「已投」✓ 漏斗与匹配中心的「历史回应」维度从现在开始积累");
+      else toast("标记失败（"+r.status+"）",true);
+    }catch(e){ toast("标记请求出错",true); }
+    loadJobs(); loadStats();
+  }
+}
+function acNo(){
+  try{ localStorage.removeItem("hermes_pending_apply"); }catch(e){}
+  document.getElementById("applyConfirm").style.display="none";
+  clearTimeout(_acTimer);
+}
+window.addEventListener("focus",checkPendingApply);
+document.addEventListener("visibilitychange",()=>{ if(!document.hidden) checkPendingApply(); });
 function toggleJD(btn){
   const b=btn.nextElementSibling;
   const open=b.style.display!=='none';
