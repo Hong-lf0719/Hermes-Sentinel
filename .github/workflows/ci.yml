@@ -1,0 +1,38 @@
+# CI：pytest 回归（打分引擎 40 例 + RAG 双后端 + 历史 regression）。
+# pgvector 用例在本机连不上 WSL Postgres 时自动 skip，CI 无需起数据库服务。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax gate (server.py + modules)
+        run: |
+          python -m compileall -q server.py hermes_common.py hermes_search.py hermes_intel.py hermes_match.py
+
+      - name: Run tests
+        env:
+          # 不注入任何真实密钥：外部调用路径在 CI 里走降级分支，只验证代码逻辑
+          DEEPSEEK_API_KEY: ""
+          TAVILY_API_KEY: ""
+        run: |
+          python -m pytest tests/ test_*.py -q --tb=short

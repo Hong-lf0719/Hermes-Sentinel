@@ -63,7 +63,18 @@ except Exception:
 
 logger = logging.getLogger("hermes")
 
-# 加载 .env（Caspian 密钥等）
+# ── 分层模块（2026-11-16 拆分：基础 / 检索 / 情报 / 匹配）──
+from hermes_common import (API_KEY, AUTH_HEADERS, BASE_URL, CASPIAN_API_KEY, DB_PATH,
+                           EXT_TOKEN, GITHUB_TOKEN, HOST, KB_PATH, MODEL, PORT,
+                           SLOW_TRACE_MS, WEB_TOKEN, _SHUTDOWN, _ai_json, _cached,
+                           _now_local, get_db, load_profile, require_auth, update_profile)
+from hermes_search import arxiv_latest, fetch_news, hackernews_top, search_github, web_search
+from hermes_intel import (_intel_backfill, _intel_backfill_task, company_research,
+                          daily_intel_backfill, router as intel_router)
+from hermes_match import invalidate_match_cache, router as match_router
+
+# 加载 .env（Caspian 密钥等）—— 2026-11-16 拆分后移入 hermes_common（import 时即加载，
+# 保证分层模块读 env 前配置已就绪；此处重复调用是幂等 no-op）
 load_dotenv(Path(__file__).parent / ".env")
 
 # 注意：不再全局禁用 SSL 证书校验（原 ssl._create_default_https_context=unverified 会让所有出站 HTTPS 不验证，属高危）。
@@ -72,56 +83,6 @@ load_dotenv(Path(__file__).parent / ".env")
 # ============================================================
 # 配置
 # ============================================================
-API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-BASE_URL = "https://api.deepseek.com/v1"
-MODEL = "deepseek-v4-flash"
-AUTH_HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-# 仅默认监听本机回环地址：避免同网段任意设备访问本服务。
-# 关键点：execute_command 工具可触发本机命令执行，0.0.0.0 暴露等同于把受限 RCE 暴露给局域网。
-# Docker/云平台部署时通过环境变量 HOST=0.0.0.0 覆盖（容器内绑 127.0.0.1 会导致端口映射失效）。
-HOST = os.getenv("HOST", "127.0.0.1")
-# 端口优先读环境变量 PORT（云端平台动态分配端口），本地默认 9865
-PORT = int(os.getenv("PORT", 9866))
-
-CASPIAN_API_KEY = os.getenv("CASPIAN_API_KEY", "")
-DB_PATH = Path(__file__).parent / "hermes.db"
-# 浏览器扩展上报鉴权 token（可在 .env 覆盖；默认仅供本机使用）
-EXT_TOKEN = os.getenv("EXT_TOKEN", secrets.token_hex(16))  # 默认随机，避免硬编码默认被猜解
-# Web UI 调用 /chat 的访问令牌。默认随机生成（启动即打印），避免硬编码默认值被猜解。
-# 由服务端在渲染 index.html/jobs.html 时注入（__WEB_TOKEN__ 占位），前端不再 fetch /api/token，
-# 本机任意进程无法再领到有效令牌；配合 127.0.0.1 绑定确保外部不可读。
-WEB_TOKEN = os.getenv("WEB_TOKEN", secrets.token_hex(16))
-# GitHub API 可选令牌：填入可把匿名 60 次/小时 提额到 5000 次/小时，缓解限流
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-KB_PATH = Path(__file__).parent / "kb"           # 长期知识库（RAG）持久化目录
-# 可观测性：单次工具调用耗时超过该阈值（毫秒）即触发自我诊断（即使没报错，也可能卡顿/降级）
-SLOW_TRACE_MS = int(os.getenv("SLOW_TRACE_MS", 8000))
-
-# ============================================================
-# SQLite 记忆系统
-# ============================================================
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    # 注意：库文件使用 DELETE 日志模式（非 WAL）。WAL 在多连接/多进程
-    # 场景下会因 -wal 文件锁竞争导致端点内同步写间歇性报 readonly。
-    # 统一 busy_timeout 让写锁竞争时等待而非立即失败。
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
-
-def _now_local() -> str:
-    """统一时间口径：本地时间（UTC+8）字符串。
-
-    SQLite 的 CURRENT_TIMESTAMP 存的是 **UTC**，而项目里 Python 侧（报告日期、
-    first_seen、画像 updated_at）一律用 datetime.now() 的本地时间 —— 两者混用
-    会差 8 小时，跨零点时「今天的对话/今天新增」会整体错一天。
-    因此所有入库时间统一显式传本参数值，不再依赖 SQL 端默认值
-    （显式传值还有个好处：对**已存在**的表也立刻生效，
-    而改 CREATE TABLE 的 DEFAULT 只影响新建库）。
-    """
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
 # ── Redis 热缓存层：会话热数据读加速（可选增强） ──
 # 设计原则：
 #   1. SQLite 是唯一事实源；Redis 只镜像"最近 60 条热消息"加速读取
@@ -249,22 +210,6 @@ def init_db():
         db.commit()
     print("🗄️ SQLite 记忆已就绪")
 
-def load_profile() -> dict:
-    """读取结构化用户画像（key -> value）。"""
-    with get_db() as db:
-        rows = db.execute("SELECT key, value FROM user_profile").fetchall()
-    return {r["key"]: r["value"] for r in rows}
-
-def update_profile(key: str, value: str) -> None:
-    """更新（UPSERT）一条用户画像。"""
-    with get_db() as db:
-        db.execute(
-            "INSERT INTO user_profile (key, value, updated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-            (key, value, _now_local())
-        )
-        db.commit()
-
 def load_history(session_id: str, max_messages: int = 30) -> list[dict]:
     """加载对话历史（Redis 热缓存优先命中；未命中回源 SQLite 并回填缓存）。"""
     global _hot_redis_hits, _hot_redis_misses
@@ -371,6 +316,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 情报层 / 匹配层路由（2026-11-16 拆分后由各自模块定义）
+app.include_router(intel_router)
+app.include_router(match_router)
 
 # 全局禁用响应缓存：岗位/对话/trace 等都是实时数据接口。
 # 若被浏览器或中间代理按启发式缓存，会出现「改了画像→重算→列表仍显示旧数据」的陈旧问题。
@@ -874,244 +823,6 @@ async def write_file(path: str, content: str) -> str:
         return f"错误: {e}"
 
 
-async def search_github(keyword: str, max_results: int = 5) -> str:
-    headers = {"Accept": "application/vnd.github+json"}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    try:
-        async with httpx.AsyncClient(timeout=15, verify=certifi.where()) as cli:
-            r = await cli.get("https://api.github.com/search/repositories", params={
-                "q": keyword, "sort": "stars", "order": "desc", "per_page": max_results
-            }, headers=headers)
-            if r.status_code != 200:
-                return f"GitHub API {r.status_code}"
-            data = r.json()
-            items = data.get("items", [])
-            if not items:
-                return f"🔍 没找到「{keyword}」"
-            lines = [f"🔍 **GitHub: 「{keyword}」** ({data['total_count']} 个结果)\n"]
-            for i, repo in enumerate(items, 1):
-                lines.append(f"{i}. **{repo['full_name']}** ⭐{repo['stargazers_count']} | {repo.get('language','?')}")
-                lines.append(f"   {(repo.get('description') or '')[:100]}")
-                lines.append(f"   🔗 {repo['html_url']}\n")
-            return "\n".join(lines)
-    except Exception as e:
-        return f"GitHub 搜索失败: {e}"
-
-
-async def hackernews_top(count: int = 10) -> str:
-    """获取 HackerNews 热门"""
-    try:
-        async with httpx.AsyncClient(timeout=15, verify=certifi.where()) as cli:
-            # 获取 top story IDs
-            r = await cli.get("https://hacker-news.firebaseio.com/v0/topstories.json")
-            ids = r.json()[:count]
-
-            # 逐条获取详情
-            stories = []
-            for sid in ids[:count]:
-                sr = await cli.get(f"https://hacker-news.firebaseio.com/v0/item/{sid}.json")
-                if sr.status_code == 200:
-                    s = sr.json()
-                    stories.append({
-                        "title": s.get("title", ""),
-                        "url": s.get("url", f"https://news.ycombinator.com/item?id={sid}"),
-                        "score": s.get("score", 0),
-                        "comments": s.get("descendants", 0),
-                    })
-
-            lines = [f"🔥 **HackerNews 热门 Top {len(stories)}**\n"]
-            for i, s in enumerate(stories, 1):
-                lines.append(f"{i}. **{s['title']}** (↑{s['score']} 💬{s['comments']})")
-                lines.append(f"   🔗 {s['url']}\n")
-            return "\n".join(lines)
-    except Exception as e:
-        return f"HackerNews 获取失败: {e}"
-
-
-async def arxiv_latest(keyword: str = "AI agent", max_results: int = 5) -> str:
-    """搜索 arXiv 最新论文（带超时退避重试，缓解限流/偶发连接失败）"""
-    last_err = "arXiv 搜索失败"
-    r = None
-    for _attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=20, verify=certifi.where()) as cli:
-                r = await cli.get("https://export.arxiv.org/api/query", params={
-                    "search_query": f"all:{keyword}",
-                    "start": 0,
-                    "max_results": max_results,
-                    "sortBy": "submittedDate",
-                    "sortOrder": "descending",
-                })
-            if r.status_code == 200:
-                last_err = ""
-                break
-            last_err = f"arXiv API {r.status_code}"
-        except Exception as e:
-            last_err = f"arXiv 请求异常: {e}"
-        if _attempt < 2:
-            await asyncio.sleep(2 * (_attempt + 1))
-    if last_err:
-        return last_err
-
-    # 简单解析 XML
-    import xml.etree.ElementTree as ET
-    ns = {"a": "http://www.w3.org/2005/Atom"}
-    root = ET.fromstring(r.text)
-    entries = root.findall("a:entry", ns)
-
-    lines = [f"📚 **arXiv 最新: 「{keyword}」** ({len(entries)} 篇)\n"]
-    for i, e in enumerate(entries, 1):
-        title = (e.find("a:title", ns).text or "").strip().replace("\n", " ")
-        url = e.find("a:id", ns).text or ""
-        authors = [a.find("a:name", ns).text for a in e.findall("a:author", ns) if a.find("a:name", ns) is not None]
-        published = (e.find("a:published", ns).text or "")[:10]
-        lines.append(f"{i}. **{title}**")
-        lines.append(f"   👤 {', '.join(authors[:3])}{'...' if len(authors)>3 else ''} | 📅 {published}")
-        lines.append(f"   🔗 {url}\n")
-    return "\n".join(lines)
-
-
-# ============================================================
-# 网页搜索（多源容错：Bing 可选 → DuckDuckGo 免密钥 → 优雅降级）
-# ============================================================
-def _parse_bing_cn_html(html_text: str, max_results: int) -> str:
-    """从 Bing 中国站结果页解析 标题/链接/摘要（<li class="b_algo"> 结构，无外部依赖）"""
-    import re
-    out = []
-    blocks = re.findall(r'<li class="b_algo".*?</li>', html_text, flags=re.DOTALL | re.IGNORECASE)
-    for b in blocks[:max_results]:
-        m = re.search(r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', b, flags=re.DOTALL | re.IGNORECASE)
-        if not m:
-            continue
-        url = m.group(1)
-        title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-        snip = ""
-        ms = re.search(r"<p[^>]*>(.*?)</p>", b, flags=re.DOTALL | re.IGNORECASE)
-        if ms:
-            snip = re.sub(r"<[^>]+>", "", ms.group(1)).strip()
-        if not title:
-            continue
-        out.append(f"{len(out) + 1}. **{title[:80]}**\n   {snip[:140]}\n   🔗 {url}\n")
-    return "\n".join(out)
-
-
-def _parse_ddg_html(html_text: str, max_results: int) -> str:
-    """从 DuckDuckGo HTML 结果页解析 标题/链接/摘要（无外部依赖）"""
-    import re
-    titles = re.findall(r'class="result__a"[^>]*>(.*?)</a>', html_text, re.DOTALL)
-    snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html_text, re.DOTALL)
-    links = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html_text)
-    if not titles:
-        return ""
-    lines = []
-    for i in range(min(len(titles), max_results)):
-        title = re.sub(r"<[^>]+>", "", titles[i]).strip()
-        snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip() if i < len(snippets) else ""
-        url = links[i] if i < len(links) else ""
-        lines.append(f"{i+1}. **{title}**")
-        if snippet:
-            lines.append(f"   {snippet[:140]}")
-        if url:
-            lines.append(f"   🔗 {url}")
-    return "\n".join(lines)
-
-
-async def web_search(query: str, max_results: int = 5) -> str:
-    """
-    多源容错的网页搜索。
-
-    数据源（按优先级自动降级）：
-      0. Tavily Search API —— 为 AI Agent 设计的搜索 API（免费额度 1000 次/月），
-         注册 tavily.com 取 key 后设 TAVILY_API_KEY 即启用；返回干净正文，国内可达
-      1. Bing Web Search v7 —— 若环境变量 BING_SEARCH_KEY 已配置
-      2. DuckDuckGo HTML —— 免密钥（大陆网络常被墙）
-      3. Bing 中国站 HTML 抓取 —— 免密钥国内直连（注意：连续自动化查询会被
-         Bing 软封锁——返回不相关的词典类结果，此时应改用 Tavily）
-      4. 全部失败 → 返回友好提示（不抛异常、不中断主流程）
-
-    设计目标：任一搜索源抖动都不应导致 Agent 整体失败 —— 这是
-    “多源容错降级”工程能力的体现。
-    """
-    # 数据源 0：Tavily（推荐：AI Agent 专用搜索 API，免费额度充足）
-    tavily_key = os.getenv("TAVILY_API_KEY")
-    if tavily_key:
-        try:
-            async with httpx.AsyncClient(timeout=20, verify=certifi.where()) as cli:
-                r = await cli.post("https://api.tavily.com/search", json={
-                    "api_key": tavily_key, "query": query,
-                    "max_results": max_results, "search_depth": "advanced",
-                    "include_answer": False,
-                })
-                if r.status_code == 200:
-                    items = r.json().get("results", [])
-                    if items:
-                        lines = [f"🔎 **Tavily 搜索: 「{query}」**\n"]
-                        for i, it in enumerate(items[:max_results], 1):
-                            lines.append(f"{i}. **{it.get('title', '')}**")
-                            content = (it.get("content", "") or "")[:160]
-                            if content:
-                                lines.append(f"   {content}")
-                            lines.append(f"   🔗 {it.get('url', '')}\n")
-                        return "\n".join(lines)
-        except Exception as e:
-            logger.warning(f"Tavily 搜索失败，降级下一数据源: {e}")
-
-    # 数据源 1：Bing（可选）
-    bing_key = os.getenv("BING_SEARCH_KEY")
-    if bing_key:
-        try:
-            async with httpx.AsyncClient(timeout=15, verify=certifi.where()) as cli:
-                r = await cli.get(
-                    "https://api.bing.microsoft.com/v7.0/search",
-                    headers={"Ocp-Apim-Subscription-Key": bing_key},
-                    params={"q": query, "count": max_results, "mkt": "zh-CN"},
-                )
-                if r.status_code == 200:
-                    items = r.json().get("webPages", {}).get("value", [])
-                    if items:
-                        lines = [f"🔎 **Bing 搜索: 「{query}」**\n"]
-                        for i, it in enumerate(items[:max_results], 1):
-                            lines.append(f"{i}. **{it.get('name', '')}**")
-                            lines.append(f"   {(it.get('snippet', '') or '')[:140]}")
-                            lines.append(f"   🔗 {it.get('url', '')}\n")
-                        return "\n".join(lines)
-        except Exception as e:
-            logger.warning(f"Bing 搜索失败，降级 DuckDuckGo: {e}")
-
-    # 数据源 2：DuckDuckGo HTML（免密钥）
-    try:
-        async with httpx.AsyncClient(timeout=15, verify=certifi.where(), headers={"User-Agent": "Mozilla/5.0"}) as cli:
-            r = await cli.post("https://html.duckduckgo.com/html/", data={"q": query})
-            if r.status_code == 200:
-                parsed = _parse_ddg_html(r.text, max_results)
-                if parsed:
-                    return f"🔎 **DuckDuckGo 搜索: 「{query}」**\n{parsed}"
-    except Exception as e:
-        logger.warning(f"DuckDuckGo 搜索失败: {e}")
-
-    # 数据源 2.5：Bing 中国站 HTML（免密钥 · 国内直连可用——DDG 被墙时的主兜底）
-    try:
-        async with httpx.AsyncClient(timeout=15, verify=certifi.where(),
-                                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
-                                              "Accept-Language": "zh-CN,zh;q=0.9"}) as cli:
-            r = await cli.get("https://cn.bing.com/search", params={"q": query, "count": max_results})
-            if r.status_code == 200 and "b_results" in r.text:
-                parsed = _parse_bing_cn_html(r.text, max_results)
-                if parsed:
-                    return f"🔎 **Bing(国内) 搜索: 「{query}」**\n{parsed}"
-    except Exception as e:
-        logger.warning(f"Bing 国内站搜索失败: {e}")
-
-    # 数据源 3：优雅降级
-    return f"⚠️ 网页搜索暂时不可用（Bing/DuckDuckGo 均失败），已跳过联网检索。"
-
-
-async def fetch_news(query: str, max_results: int = 5) -> str:
-    """新闻检索便捷封装，report 函数共用"""
-    return await web_search(query, max_results)
-
-
 # ============================================================
 # 长期知识库（RAG）—— 让 Hermes 拥有可检索的「长期记忆」
 # ============================================================
@@ -1191,203 +902,6 @@ async def profile_update(key: str, value: str) -> str:
         return f"✅ 已更新画像「{key}」= {value}"
     except Exception as e:
         return f"⚠️ 画像更新失败: {e}"
-
-
-# ── 公司情报：投递前调研（学历门槛 / 员工口碑 / 近期动态 / 面经） ──
-# 面向"民办二本投大厂容易石沉大海"的真实痛点：投之前先看这家公司
-# 对学历的态度、口碑与近期稳定性，把有限的精力投给回复率更高的公司。
-_COMPANY_INTEL_TTL_DAYS = 7
-_INTEL_QUERIES = [
-    "{c} 校园招聘 学历要求 985 211 双非",
-    "{c} 员工评价 加班 工作强度",
-    "{c} 裁员 扩张 经营状况",
-    "{c} 面经 面试经验 校招",
-    "{c} 福利待遇 包住 补贴 六险一金",
-    "{c} 校招 双非 二本 普通本科 能投吗",
-]
-
-
-def _save_company_intel(company: str, intel: dict) -> None:
-    with get_db() as db:
-        db.execute(
-            "INSERT INTO company_intel (company, intel_json, searched_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(company) DO UPDATE SET intel_json=excluded.intel_json, "
-            "searched_at=excluded.searched_at",
-            (company, json.dumps(intel, ensure_ascii=False), _now_local()),
-        )
-        db.commit()
-
-
-def _load_company_intel(company: str) -> dict | None:
-    with get_db() as db:
-        r = db.execute(
-            "SELECT intel_json, searched_at FROM company_intel WHERE company = ?", (company,)
-        ).fetchone()
-    if not r:
-        return None
-    try:
-        return {"intel": json.loads(r["intel_json"]), "searched_at": r["searched_at"]}
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _intel_stale(cached: dict) -> bool:
-    sa = (cached.get("searched_at") or "")[:19]
-    try:
-        dt = datetime.strptime(sa, "%Y-%m-%d %H:%M:%S")
-        return (datetime.now() - dt).days >= _COMPANY_INTEL_TTL_DAYS
-    except Exception:  # noqa: BLE001
-        return True
-
-
-def _intel_fresh(cached: dict | None) -> bool:
-    """情报"新鲜且新 schema"才算可用。
-
-    旧 schema 卡（2026-11-15 之前，只有学历门槛/口碑，没有
-    school_tier_friendly/welfare/difficulty）即使 7 天内也自动重研升级，
-    保证匹配中心五维打分与情报弹窗拿得到新字段。
-    """
-    if not cached or _intel_stale(cached):
-        return False
-    return "school_tier_friendly" in (cached.get("intel") or {})
-
-
-async def _ai_json(prompt: str, max_tokens: int = 2600) -> dict | None:
-    """LLM 结构化 JSON 输出（json_object 模式 + 3 次重试）。失败返回 None。"""
-    last_err = None
-    for _attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=90, verify=certifi.where()) as cli:
-                r = await cli.post(
-                    f"{BASE_URL}/chat/completions",
-                    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-                    json={"model": MODEL,
-                          "messages": [{"role": "user", "content": prompt}],
-                          "max_tokens": max_tokens, "temperature": 0.4,
-                          "response_format": {"type": "json_object"}},
-                )
-            if r.status_code != 200:
-                last_err = f"HTTP {r.status_code}"
-                await asyncio.sleep(2)
-                continue
-            content = ((r.json().get("choices", [{}])[0].get("message", {}) or {}).get("content") or "").strip()
-            if not content:
-                await asyncio.sleep(2)
-                continue
-            return json.loads(content)
-        except Exception as e:  # noqa: BLE001
-            last_err = str(e)
-            await asyncio.sleep(2)
-    logger.warning(f"_ai_json 生成失败: {last_err}")
-    return None
-
-
-def _intel_reply_text(company: str, intel: dict) -> str:
-    bar = intel.get("school_barrier") or "未知"
-    tf = intel.get("school_tier_friendly") or "未知"
-    df = intel.get("difficulty") or "未知"
-    lines = [f"🏢 {company} · 学历门槛：{bar} · 对双非：{tf} · 笔面试：{df}（置信度 {intel.get('confidence', '低')}）"]
-    if intel.get("school_note"):
-        lines.append(f"· {intel['school_note']}")
-    if intel.get("school_tier_note"):
-        lines.append(f"· 院校态度依据：{intel['school_tier_note']}")
-    wf = [w for w in (intel.get("welfare") or []) if w]
-    if wf:
-        lines.append("🎁 福利：" + "、".join(wf[:6]))
-    for k, icon in (("employee_voice", "🗣 员工口碑"), ("recent_moves", "📈 近期动态"), ("interview_tips", "🧪 面经要点")):
-        vals = intel.get(k) or []
-        if vals:
-            lines.append(f"{icon}：" + "；".join(vals[:3]))
-    if intel.get("w2w_advice"):
-        lines.append(f"💡 建议：{intel['w2w_advice']}")
-    lines.append("（信息来自公开搜索摘要，供参考非事实结论）")
-    return "\n".join(lines)
-
-
-async def company_research(company: str = "", focus: str = "") -> str:
-    """工具入口：多路搜索 + LLM 结构化汇总，生成公司情报卡（7 天缓存）。"""
-    company = (company or "").strip()
-    if not company:
-        return "⚠️ 请告诉我要调研的公司名"
-    cached = _load_company_intel(company)
-    if _intel_fresh(cached):
-        return _intel_reply_text(company, cached["intel"])
-
-    queries = [q.format(c=company) for q in _INTEL_QUERIES]
-    gathered = await asyncio.gather(
-        *[_cached(f"intel_{company}_{i}", 600, lambda qs=q: web_search(qs, 6))
-          for i, q in enumerate(queries)],
-        return_exceptions=True,
-    )
-    texts = []
-    for i, r in enumerate(gathered):
-        body = r if isinstance(r, str) else f"搜索失败: {r}"
-        texts.append(f"【检索{i + 1}】{body}")
-    material = "\n".join(texts)[:6000]
-
-    # 用户背景动态注入（哨兵画像 + user_profile KV，不再硬编码）
-    from job_sentinel.profile import load_profile as load_sentinel_profile
-    prof_path = Path(__file__).parent / "job_sentinel" / "profile.json"
-    prof = load_sentinel_profile(prof_path)
-    kv = load_profile()
-    user_bg = [
-        f"院校层次：{prof.get('school_tier', '民办二本/独立学院')}（{kv.get('学校', '')}）",
-        f"学历：{prof.get('education', '本科')}（{kv.get('毕业年份', '2027')} 届）",
-        f"专业：{kv.get('专业', '')}",
-        f"技能栈：{kv.get('技能栈', '')}",
-        f"求职方向：{(prof.get('directions') or [])}",
-        f"目标城市：{(prof.get('regions') or [])}",
-        f"加班接受度：{prof.get('accept_overtime', '中')}（用户最反感口碑里的高强度加班时，请在建议中体现）",
-    ]
-
-    prompt = f"""你是求职情报分析师。用户背景：
-{chr(10).join(user_bg)}
-调研公司：{company}{('，重点关注：' + focus) if focus else ''}
-
-以下是六路公开搜索摘要（可能含广告或无关内容，请甄别；没有证据的维度如实写"未检索到"）：
-{material}
-
-输出 JSON（不要解释）：
-{{
-  "school_barrier": "宽松|一般|严格|未知",
-  "school_note": "学历门槛判断依据一句话（引用搜索证据；无证据则写'未检索到明确学历门槛信息'）",
-  "school_tier_friendly": "双非友好|看重院校|未知",
-  "school_tier_note": "该校招对双非/民办/普通本科的实际态度一句话（引用面经或录取院校证据）",
-  "welfare": ["福利清单（包住宿/餐补/六险一金/班车/房补等，仅收录搜索材料里明确提到的）"],
-  "difficulty": "偏高|适中|友好|未知",
-  "difficulty_note": "岗位要求难度判断一句话（对照用户技能栈：Python/LangGraph/FastAPI/数据分析）",
-  "employee_voice": ["员工口碑要点（加班强度/氛围/待遇，标注来源网站提示）"],
-  "recent_moves": ["近期动态（扩张/裁员/经营状况）"],
-  "interview_tips": ["面经要点"],
-  "w2w_advice": "结合民办二本背景给一句投递建议",
-  "confidence": "低|中|高",
-  "sources_hint": ["来源网站提示"]
-}}
-规则：只依据搜索材料，绝不编造；证据越少 confidence 越低。"""
-
-    intel = await _ai_json(prompt)
-    if not intel:
-        return "⚠️ 公司情报生成失败（搜索/模型暂时不可用），稍后再试"
-    intel.setdefault("company", company)
-    _save_company_intel(company, intel)
-    return _intel_reply_text(company, intel)
-
-
-
-
-
-# —— 简单 TTL 缓存：缓解 GitHub/arXiv/HN/新闻 外部 API 限流（日报频繁生成时不重复打）——
-_FETCH_CACHE: dict[str, tuple[float, object]] = {}
-
-async def _cached(key: str, ttl: int, coro_fn):
-    """带 TTL 的内存缓存：命中未过期直接返回，避免重复请求外部 API 触发限流。"""
-    now = time.time()
-    hit = _FETCH_CACHE.get(key)
-    if hit and now - hit[0] < ttl:
-        return hit[1]
-    data = await coro_fn()
-    _FETCH_CACHE[key] = (now, data)
-    return data
 
 
 def _user_job_context() -> str:
@@ -2115,6 +1629,7 @@ async def _startup_auto_scan():
 DAILY_PUSH_HOUR = int(os.getenv("HERMES_DAILY_PUSH_HOUR", "8"))
 DAILY_PUSH_MIN = int(os.getenv("HERMES_DAILY_PUSH_MIN", "30"))
 _DAILY_LAST_KEY = "每日推送最后日期"
+_INTEL_DAILY_KEY = "情报每日补全最后日期"
 
 
 def _daily_push_done_today() -> bool:
@@ -2168,6 +1683,12 @@ async def _daily_scheduler():
             if now >= target and not _daily_push_done_today():
                 logger.info("到达每日推送时点，执行今日情报推送")
                 await _run_daily_push()
+            # 每日情报自动补全（09:05，日报推送完成后）：Top 候选公司生成情报卡，
+            # 让匹配中心「学历友好/福利」维度随时间自动变准（无需手动点批量调研）
+            intel_target = now.replace(hour=9, minute=5, second=0, microsecond=0)
+            if now >= intel_target and load_profile().get(_INTEL_DAILY_KEY, "") != now.strftime("%Y-%m-%d"):
+                update_profile(_INTEL_DAILY_KEY, now.strftime("%Y-%m-%d"))
+                asyncio.create_task(daily_intel_backfill(50, 65))
         except Exception as e:  # noqa: BLE001
             logger.warning(f"每日定时推送异常（下一分钟重试）: {e}")
         await asyncio.sleep(60)  # 异步让出循环；进程退出时任务随循环终止
@@ -2860,26 +2381,6 @@ async def stream_chat(message: str, session_id: str = "default", direction: str 
 # ============================================================
 # FastAPI 路由
 # ============================================================
-async def require_auth(request: Request,
-                      authorization: Optional[str] = Header(None),
-                      x_token: Optional[str] = Header(None)):
-    """校验 /chat 访问令牌：支持 Authorization: Bearer <TOKEN> / X-Token / ?token= 三种方式。"""
-    token = None
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization[7:].strip()
-    elif x_token:
-        token = x_token
-    else:
-        token = request.query_params.get("token")
-    if not token or token != WEB_TOKEN:
-        raise HTTPException(status_code=401, detail="未授权：缺少或错误的访问令牌")
-    return True
-
-
-# 注：/api/token 已移除——WEB_TOKEN 改为服务端渲染注入 index.html/jobs.html（__WEB_TOKEN__ 占位），
-# 前端不再 fetch 该端点，本机任意进程无法再领到有效令牌（详见 serve_index / serve_jobs）。
-
-
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = "default"
@@ -3397,6 +2898,7 @@ async def api_jobs_rescore():
     except Exception as e:  # noqa: BLE001
         logger.error(f"重算分数失败: {e}")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+    invalidate_match_cache()   # 分数变了，匹配中心立即重算
     return {"ok": True, **res}
 
 
@@ -3411,6 +2913,7 @@ async def api_job_status(raw_hash: str, request: Request):
                 status_code=400,
                 content={"ok": False, "error": f"非法状态: {status!r}"},
             )
+    invalidate_match_cache()   # 状态变更影响「历史回应」维度与漏斗
     return {"ok": True, "raw_hash": raw_hash, "status": status}
 
 
@@ -3441,6 +2944,7 @@ async def api_jobs_batch_status(request: Request):
             except Exception:  # noqa: BLE001
                 pass
         c.commit()
+    invalidate_match_cache()
     return {"ok": True, "changed": changed, "status": status}
 
 
@@ -3450,6 +2954,7 @@ async def api_job_hide(raw_hash: str):
     from job_sentinel.store import get_db as js_get_db, set_hidden
     with js_get_db(str(DB_PATH)) as c:
         set_hidden(c, raw_hash, True)
+    invalidate_match_cache()
     return {"ok": True, "raw_hash": raw_hash, "hidden": True}
 
 
@@ -3459,6 +2964,7 @@ async def api_job_unhide(raw_hash: str):
     from job_sentinel.store import get_db as js_get_db, set_hidden
     with js_get_db(str(DB_PATH)) as c:
         set_hidden(c, raw_hash, False)
+    invalidate_match_cache()
     return {"ok": True, "raw_hash": raw_hash, "hidden": False}
 
 
@@ -3477,6 +2983,8 @@ async def api_job_adopt(raw_hash: str, request: Request):
         ok = adopt_fill(c, raw_hash, fill)
         if ok:
             rescore_all(c, load_profile(prof_path))
+    if ok:
+        invalidate_match_cache()
     return {"ok": ok, "raw_hash": raw_hash}
 
 
@@ -3503,6 +3011,7 @@ async def api_scan():
     except Exception as e:  # noqa: BLE001
         logger.error(f"哨兵扫描失败: {e}")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+    invalidate_match_cache()   # 新岗位入库，匹配中心立即重算
     return {
         "ok": True,
         "collected": res.get("collected", 0),
@@ -3518,6 +3027,7 @@ async def api_extension_apply(request: Request):
     token = auth.replace("Bearer ", "", 1).strip()
     if token != EXT_TOKEN:
         return JSONResponse(status_code=401, content={"ok": False, "error": "unauthorized"})
+    invalidate_match_cache()   # 扩展上报新投递（新岗位/状态=已投）
     data = await request.json()
     company = (data or {}).get("company", "").strip()
     title = (data or {}).get("title", "").strip()
@@ -3610,6 +3120,7 @@ async def api_extension_deliveries(request: Request):
     token = auth.replace("Bearer ", "", 1).strip()
     if token != EXT_TOKEN:
         return JSONResponse(status_code=401, content={"ok": False, "error": "unauthorized"})
+    invalidate_match_cache()   # 扩展批量回写投递状态
     data = await request.json()
     rows = (data or {}).get("rows", []) or []
     url = (data or {}).get("url", "") or ""
@@ -3667,21 +3178,6 @@ async def api_profile_suggest(kw: str = ""):
 
 
 # ── 公司情报 API：投递前调研（首次现场生成 10~40 秒，之后 7 天缓存秒回） ──
-@app.get("/api/company-intel", dependencies=[Depends(require_auth)])
-async def api_company_intel(company: str, refresh: bool = False, focus: str = ""):
-    company = (company or "").strip()
-    if not company:
-        raise HTTPException(status_code=400, detail="缺少 company 参数")
-    cached = _load_company_intel(company)
-    if cached and not refresh and _intel_fresh(cached):
-        return {"company": company, "intel": cached["intel"],
-                "searched_at": cached["searched_at"], "cached": True}
-    await company_research(company, focus)
-    fresh = _load_company_intel(company)
-    return {"company": company, "intel": (fresh or {}).get("intel", {}),
-            "searched_at": (fresh or {}).get("searched_at", ""), "cached": False}
-
-
 # ── 投递回复率分析：把"投了没回应"变成可视化的分组转化率 ──
 @app.get("/api/response-analysis")
 async def api_response_analysis():
@@ -3735,79 +3231,6 @@ def _has_table(name: str) -> bool:
         return db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
         ).fetchone() is not None
-
-
-# ── 情报批量补全：给高分候选公司批量生成情报卡（后台任务，配额可控） ──
-# 目的：让匹配中心的"学历友好/成功率信号"有真实区分度——情报覆盖面
-# 越大，信号越有区分度。节流 + 状态可查，防止 Tavily/LLM 配额失控。
-_intel_backfill: dict = {"running": False, "done": 0, "total": 0,
-                         "current": "", "errors": [], "started_at": ""}
-
-_INTEL_BACK_FILL_PAUSE_S = 2   # 每家公司之间停 2 秒（Tavily + LLM 配额保护）
-
-
-async def _intel_backfill_task(limit: int = 20, min_score: int = 60):
-    from job_sentinel.store import get_db as js_get_db
-    _intel_backfill.update({"running": True, "done": 0, "total": 0, "current": "",
-                            "errors": [], "started_at": _now_local()})
-    logger.info(f"情报批量补全开始：limit={limit}, min_score={min_score}")
-    try:
-        with js_get_db(str(DB_PATH)) as c:
-            rows = c.execute(
-                "SELECT company, MAX(match_score) AS ms FROM jobs WHERE user_hidden=0 "
-                "GROUP BY company HAVING ms >= ? ORDER BY ms DESC LIMIT ?",
-                (min_score, limit * 2),
-            ).fetchall()
-        # 只调研"没有新鲜情报"的公司（缓存 7 天内有效则跳过）
-        targets = []
-        for r in rows:
-            co = (r["company"] or "").strip()
-            cached = _load_company_intel(co)
-            if _intel_fresh(cached):  # 旧 schema 卡不算新鲜，会自动重研升级
-                continue
-            targets.append((co, r["ms"]))
-            if len(targets) >= limit:
-                break
-        _intel_backfill["total"] = len(targets)
-        for co, ms in targets:
-            if _SHUTDOWN.is_set():
-                break
-            _intel_backfill["current"] = co
-            try:
-                await company_research(co)
-                _intel_backfill["done"] += 1
-            except Exception as e:  # noqa: BLE001
-                _intel_backfill["errors"].append(f"{co}: {e}")
-                _intel_backfill["done"] += 1
-            await asyncio.sleep(_INTEL_BACK_FILL_PAUSE_S)
-        logger.info(
-            f"情报批量补全完成：{_intel_backfill['done']}/{_intel_backfill['total']}，"
-            f"错误 {_len(_intel_backfill['errors']) if True else 0}"
-        )
-    except Exception as e:  # noqa: BLE001
-        _intel_backfill["running"] = False
-        logger.warning(f"情报批量补全异常终止: {e}")
-    finally:
-        _intel_backfill["running"] = False
-
-
-def _len(x):
-    return len(x) if x else 0
-
-
-@app.post("/api/intel/backfill", dependencies=[Depends(require_auth)])
-async def api_intel_backfill(limit: int = 20, min_score: int = 60):
-    """启动批量情报补全（后台执行）。配额参考：20 家 ≈ 160 次 Tavily + 20 次 LLM。"""
-    if _intel_backfill.get("running"):
-        raise HTTPException(status_code=409, detail="批量调研已在进行中，请等它结束")
-    asyncio.create_task(_intel_backfill_task(limit, min_score))
-    return {"started": True, "limit": limit, "min_score": min_score}
-
-
-@app.get("/api/intel/backfill/status")
-async def api_intel_backfill_status():
-    return {**_intel_backfill,
-            "tavily_configured": bool(os.getenv("TAVILY_API_KEY"))}
 
 
 # ── 用户画像（user_profile 表）读写：画像中心 UI 用 ──
@@ -3890,93 +3313,6 @@ async def match_page():
     # 注入 WEB_TOKEN：偏好保存（POST /api/profile）需要鉴权
     html = p.read_text("utf-8").replace("__WEB_TOKEN__", WEB_TOKEN)
     return HTMLResponse(html)
-
-
-@app.get("/api/match/companies")
-async def api_match_companies():
-    """匹配中心核心接口：按公司聚合岗位 → 五维匹配度打分 → 推荐排序。
-
-    五维：岗位匹配 40（该公司最高/平均 match_score）· 学历友好 25（岗位学历文本 +
-    公司情报实搜门槛 + 对双非/民办的实际态度）· 福利 15（公司福利 ∩ 福利偏好）·
-    偏好 10（性质/行业/加班接受度×口碑）· 历史回应 10（你对该性质公司的实测
-    回应率，样本≥3 才计权）。
-    """
-    from job_sentinel.models import Job
-    from job_sentinel.profile import load_profile
-    from job_sentinel.matcher import company_match
-    from pathlib import Path as _P
-
-    prof_path = _P(__file__).parent / "job_sentinel" / "profile.json"
-    profile = load_profile(prof_path)
-
-    # 公司情报 map（含 7 天内有效性标注）
-    intel_map: dict = {}
-    try:
-        with get_db() as db:
-            for r in db.execute("SELECT company, intel_json, searched_at FROM company_intel").fetchall():
-                try:
-                    intel_map[r["company"]] = {
-                        "intel": json.loads(r["intel_json"]),
-                        "stale": (datetime.now() - datetime.strptime(r["searched_at"][:19], "%Y-%m-%d %H:%M:%S")).days >= 7,
-                    }
-                except Exception:  # noqa: BLE001
-                    pass
-    except Exception:  # noqa: BLE001
-        pass
-
-    # 历史回应率（按企业性质；样本 ≥3 的才传给打分器）
-    resp_by_type: dict = {}
-    try:
-        with get_db() as db:
-            rows = db.execute(
-                "SELECT enterprise_type AS g, status, COUNT(*) AS n FROM jobs "
-                "WHERE status IN ('已投','笔试','面试','OC','挂') "
-                "AND TRIM(COALESCE(enterprise_type,'')) != '' "
-                "GROUP BY enterprise_type, status"
-            ).fetchall()
-        agg: dict = {}
-        for r in rows:
-            g = agg.setdefault(r["g"], {"applied": 0, "responded": 0})
-            g["applied"] += r["n"]
-            if r["status"] in ("笔试", "面试", "OC", "挂"):
-                g["responded"] += r["n"]
-        resp_by_type = {g: {"applied": v["applied"],
-                            "response_rate": round(v["responded"] / v["applied"], 2) if v["applied"] else 0}
-                        for g, v in agg.items()}
-    except Exception:  # noqa: BLE001
-        pass
-
-    # 公司聚合（含隐藏岗但排除占位公司——占位岗已在入库时过滤）
-    companies: dict = {}
-    try:
-        with get_db() as db:
-            rows = db.execute("SELECT * FROM jobs WHERE user_hidden=0").fetchall()
-        for r in rows:
-            d = dict(r)
-            companies.setdefault(d.get("company") or "未知公司", []).append(d)
-    except Exception:  # noqa: BLE001
-        pass
-
-    out = []
-    for company, jrows in companies.items():
-        intel_entry = intel_map.get(company)
-        intel = (intel_entry or {}).get("intel")
-        resp = resp_by_type.get((jrows[0].get("enterprise_type") or "").strip())
-        m = company_match(jrows, profile, intel, resp)
-        best = max(jrows, key=lambda j: j.get("match_score") or 0)
-        m["best_job"] = {"title": best.get("title"), "city": best.get("city"),
-                         "deadline": best.get("deadline"), "salary": best.get("salary"),
-                         "url": best.get("url"), "batch": best.get("batch")}
-        m["company"] = company
-        m["intel_stale"] = bool(intel_entry and (intel_entry or {}).get("stale"))
-        m["has_intel"] = bool(intel_entry)
-        iv = (intel_entry or {}).get("intel") or {}
-        m["school_barrier"] = iv.get("school_barrier") or ""
-        m["school_note"] = iv.get("school_note") or ""
-        m["best_url"] = best.get("url") or ""
-        out.append(m)
-    out.sort(key=lambda m: -m["score"])
-    return {"companies": out, "count": len(out), "profile": profile}
 
 
 # ============================================================
