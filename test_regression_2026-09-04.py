@@ -42,7 +42,7 @@ def build_ns() -> dict:
     return ns
 
 
-def test_verify_result() -> int:
+def test_verify_result():
     """方案二：结果校验逻辑。"""
     ns = build_ns()
     exec(extract_function("_verify_result"), ns)
@@ -75,10 +75,11 @@ def test_verify_result() -> int:
         else:
             print(f"  [FAIL] {fn}: 期望={expect} 实际={got} ({note})")
     print(f"[方案二] _verify_result: {passed}/{len(cases)} 通过")
-    return passed == len(cases)
+    # pytest 9 起「return 非None」按失败处理（2026-11-21 CI 修复），改为显式断言
+    assert passed == len(cases), f"_verify_result 仅 {passed}/{len(cases)} 通过"
 
 
-def test_parallel_semantics() -> bool:
+def test_parallel_semantics():
     """方案一：验证并行执行 + 结果顺序与输入对齐。"""
     ns = build_ns()
     exec(extract_function("_run_one_tool"), ns)
@@ -118,7 +119,9 @@ def test_parallel_semantics() -> bool:
     order_ok = [r[1] for r in results] == ["slow-result", "fast_a-result", "fast_b-result"]
     parallel_ok = elapsed < 0.35  # 串行会 >0.4s，并行约 0.2s
     print(f"[方案一] 并行耗时 {elapsed:.2f}s (串行约 0.40s)，结果顺序对齐={order_ok}")
-    return order_ok and parallel_ok
+    # pytest 9 起「return 非None」按失败处理（2026-11-21 CI 修复），改为显式断言
+    assert order_ok, "结果顺序与输入不对齐"
+    assert parallel_ok, f"并行耗时 {elapsed:.2f}s 接近串行（>0.35s）"
 
 
 if __name__ == "__main__":

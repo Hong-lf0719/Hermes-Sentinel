@@ -24,6 +24,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          # pytest 不在 requirements.txt（运行时依赖不含测试），显式安装；
+          # 锁 <9：pytest 9 起「test 函数 return 非None」由警告升级为失败
+          pip install "pytest>=8,<9"
 
       - name: Syntax gate (server.py + modules)
         run: |

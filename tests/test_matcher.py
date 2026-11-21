@@ -118,9 +118,13 @@ def test_deadline_buckets():
 
 
 def test_days_to_deadline_formats():
+    from datetime import date, timedelta
     assert days_to_deadline(mkjob(deadline="2026年11月19日"), "2026-11-16") == 3
     assert days_to_deadline(mkjob(deadline="招满即止")) is None
-    assert days_to_deadline(mkjob(deadline="2026-11-19")) == 3
+    # 2026-11-21 CI 修复：deadline 用"今天+3"动态生成——
+    # 旧写法硬编码 "2026-11-19"，过 11-19 后 date.today() 基线的断言永远失败
+    dl3 = (date.today() + timedelta(days=3)).isoformat()
+    assert days_to_deadline(mkjob(deadline=dl3)) == 3
 
 
 # ══ 4. 薪资折算与打分（0-5，可负）═══════════════════════════════
