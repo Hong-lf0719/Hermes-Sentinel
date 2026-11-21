@@ -38,4 +38,9 @@ jobs:
           DEEPSEEK_API_KEY: ""
           TAVILY_API_KEY: ""
         run: |
-          python -m pytest tests/ test_*.py -q --tb=short
+          python -m pytest tests/ test_*.py -q --tb=short > /tmp/pytest.log 2>&1; rc=$?
+          echo "pytest exit=$rc"
+          # 失败行转成 ::error:: 注解——注解走公开 API 匿名可读（job 日志下载需管理员权限）
+          grep -E "^(FAILED|ERROR) " /tmp/pytest.log | while IFS= read -r line; do echo "::error::$line"; done
+          tail -5 /tmp/pytest.log | while IFS= read -r line; do echo "::error::$line"; done
+          exit $rc
