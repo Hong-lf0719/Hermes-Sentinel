@@ -13,7 +13,16 @@
 from __future__ import annotations
 
 from .store import KnowledgeStore
-from .pgstore import PgVectorStore
+# pgvector 后端是可选增强：仅当选了 HERMES_RAG_BACKEND=pgvector 才需要
+# pgvector 依赖。这里必须条件导入——2026-11-21 CI 失败根因：全新环境没装
+# pgvector（requirements.txt 也不含它），无条件的 `from .pgstore import`
+# 让「零依赖的本地 RAG」连 import 都过不去，连带炸掉 FixedHashEmbedder 测试。
+try:  # pragma: no cover - 分支取决于环境
+    from .pgstore import PgVectorStore
+    HAS_PGVECTOR = True
+except ImportError:
+    PgVectorStore = None
+    HAS_PGVECTOR = False
 from .embeddings import TfidfEmbedder, DenseEmbedder, FixedHashEmbedder, create_embedder
 from .chunking import chunk_text, chunk_markdown
 from .rag import get_store, retrieve_context
@@ -24,6 +33,7 @@ __version__ = "0.2.0"
 __all__ = [
     "KnowledgeStore",
     "PgVectorStore",
+    "HAS_PGVECTOR",
     "TfidfEmbedder",
     "DenseEmbedder",
     "FixedHashEmbedder",
